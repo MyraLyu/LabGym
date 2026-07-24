@@ -41,7 +41,7 @@ from .gui_categorizer import PanelLv2_GenerateExamples,PanelLv2_TrainCategorizer
 logger.debug('importing %s done', '.gui_categorizer')
 from .gui_detector import PanelLv2_GenerateImages,PanelLv2_TrainDetectors,PanelLv2_TestDetectors
 from .gui_preprocessor import PanelLv2_ProcessVideos,PanelLv2_DrawMarkers
-from .gui_analyzer import PanelLv2_AnalyzeBehaviors,PanelLv2_MineResults,PanelLv2_PlotBehaviors,PanelLv2_CalculateDistances, PanelLv2_StateTransitionMap
+from .gui_analyzer import PanelLv2_AnalyzeBehaviors, PanelLv2_BehavioralMotifDiscovery,PanelLv2_MineResults,PanelLv2_PlotBehaviors,PanelLv2_CalculateDistances, PanelLv2_StateTransitionMap
 from LabGym import selftest
 
 
@@ -337,7 +337,13 @@ class PanelLv1_AnalysisModule(wx.Panel):
 		button_calculatedistances.Bind(wx.EVT_BUTTON,self.calculate_distances)
 		wx.Button.SetToolTip(button_calculatedistances,'Using LabGym analysis results to calculate: 1. The shortest distances among the locations where animals perform the selected behaviors for the first time, in chronological order. 2. The total traveling distances of the actual route the animals.')
 		boxsizer.Add(button_calculatedistances,0,wx.ALIGN_CENTER,10)
-		boxsizer.Add(0,30,0)
+		boxsizer.Add(0,20,0)
+
+		button_motifs=wx.Button(panel,label='Behavioral Motif Discovery',size=(300,40))
+		button_motifs.Bind(wx.EVT_BUTTON,self.discover_motifs)
+		wx.Button.SetToolTip(button_motifs,'Discover recurring behavioral routines with a categorical Hidden Markov Model after behavior analysis.')
+		boxsizer.Add(button_motifs,0,wx.ALIGN_CENTER,10)
+		boxsizer.Add(0,20,0)
 
 		panel.SetSizer(boxsizer)
 
@@ -381,6 +387,13 @@ class PanelLv1_AnalysisModule(wx.Panel):
 			lambda: PanelLv2_StateTransitionMap(self.notebook),
 			title
 		)
+
+	def discover_motifs(self,event):
+		"""Open the Behavioral Motif Discovery panel."""
+
+		title = 'Behavioral Motif Discovery'
+		add_or_select_notebook_page(self.notebook, lambda: PanelLv2_BehavioralMotifDiscovery(self.notebook), title)
+
 
 
 class MainFrame(wx.Frame):
