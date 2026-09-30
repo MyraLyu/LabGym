@@ -52,6 +52,7 @@ from .tools import (
 	stm_default_behavior_color,
 )
 from .gui_utils import add_info_button, INFO_COLOUR_S3, INFO_COLOUR_S4
+from .behaviormotifs import discover_behavioral_motifs, apply_motif_names
 
 
 class ColorPicker(wx.Dialog):
@@ -2216,3 +2217,1159 @@ class PanelLv2_StateTransitionMap(wx.Panel):
 				'Error',
 				wx.OK|wx.ICON_ERROR
 			)
+
+class PanelLv2_BehavioralMotifDiscovery(wx.Panel):
+
+	'''
+	The 'Behavioral Motif Discovery' functional unit.
+
+	This panel performs post-analysis behavioral motif discovery
+	from an existing LabGym all_event_probability.xlsx file.
+
+	The workflow is:
+
+	1. Select an existing LabGym analysis file.
+	2. Select an output folder.
+	3. Specify the number of motifs.
+	4. Specify motif-model parameters.
+	5. Discover motifs.
+	6. Review automatically inferred motifs.
+	7. Optionally assign user-defined motif names.
+
+	User-defined names are interpretive labels only and do not
+	change the fitted motif model.
+	'''
+
+
+	class _MotifReviewDialog(wx.Dialog):
+
+		'''
+		Dialog for reviewing inferred motifs and assigning names.
+		'''
+
+		def __init__(
+			self,
+			parent,
+			animal_id,
+			summary,
+		):
+
+			super().__init__(
+				parent,
+				title='Review and name motifs - ID '+str(animal_id),
+				size=(900,700),
+			)
+
+			self.summary=summary.copy()
+			self.name_controls={}
+
+			main_sizer=wx.BoxSizer(wx.VERTICAL)
+
+			instruction=wx.StaticText(
+				self,
+				label=(
+					'Review the automatically inferred motifs below. '
+					'Enter an interpretation name for each motif. '
+					'These names do not alter the fitted model.'
+				),
+			)
+
+			main_sizer.Add(
+				instruction,
+				0,
+				wx.ALL|wx.EXPAND,
+				12,
+			)
+
+			scrolled=wx.ScrolledWindow(
+				self,
+				style=wx.VSCROLL,
+			)
+
+			scrolled.SetScrollRate(10,10)
+
+			motif_sizer=wx.BoxSizer(wx.VERTICAL)
+
+			for _,row in self.summary.iterrows():
+
+				motif_id=self._get_motif_id(row)
+
+				box=wx.StaticBox(
+					scrolled,
+					label='Motif '+str(motif_id),
+				)
+
+				box_sizer=wx.StaticBoxSizer(
+					box,
+					wx.VERTICAL,
+				)
+
+				details=[]
+
+				if 'dominant_behavior_sequence' in row.index:
+					value=row['dominant_behavior_sequence']
+
+					if pd.notna(value):
+						details.append(
+							'Dominant sequence: '
+							+str(value)
+						)
+
+				elif 'dominant_sequence' in row.index:
+					value=row['dominant_sequence']
+
+					if pd.notna(value):
+						details.append(
+							'Dominant sequence: '
+							+str(value)
+						)
+
+				if 'representative_behaviors' in row.index:
+					value=row['representative_behaviors']
+
+					if pd.notna(value):
+						details.append(
+							'Representative behaviors: '
+							+str(value)
+						)
+
+				elif 'top_behaviors' in row.index:
+					value=row['top_behaviors']
+
+					if pd.notna(value):
+						details.append(
+							'Representative behaviors: '
+							+str(value)
+						)
+
+				stat_parts=[]
+
+				if 'occupancy' in row.index:
+
+					value=row['occupancy']
+
+					if pd.notna(value):
+
+						try:
+							stat_parts.append(
+								'Occupancy: '
+								+format(float(value),'.3f')
+							)
+
+						except (TypeError,ValueError):
+							stat_parts.append(
+								'Occupancy: '
+								+str(value)
+							)
+
+				if 'mean_duration' in row.index:
+
+					value=row['mean_duration']
+
+					if pd.notna(value):
+
+						try:
+							stat_parts.append(
+								'Mean duration: '
+								+format(float(value),'.3f')
+								+' s'
+							)
+
+						except (TypeError,ValueError):
+							stat_parts.append(
+								'Mean duration: '
+								+str(value)
+							)
+
+				elif 'mean_duration_seconds' in row.index:
+
+					value=row['mean_duration_seconds']
+
+					if pd.notna(value):
+
+						try:
+							stat_parts.append(
+								'Mean duration: '
+								+format(float(value),'.3f')
+								+' s'
+							)
+
+						except (TypeError,ValueError):
+							stat_parts.append(
+								'Mean duration: '
+								+str(value)
+							)
+
+				if 'occurrences' in row.index:
+
+					value=row['occurrences']
+
+					if pd.notna(value):
+						stat_parts.append(
+							'Occurrences: '
+							+str(value)
+						)
+
+				elif 'number_of_occurrences' in row.index:
+
+					value=row['number_of_occurrences']
+
+					if pd.notna(value):
+						stat_parts.append(
+							'Occurrences: '
+							+str(value)
+						)
+
+				elif 'n_occurrences' in row.index:
+
+					value=row['n_occurrences']
+
+					if pd.notna(value):
+						stat_parts.append(
+							'Occurrences: '
+							+str(value)
+						)
+
+				if len(stat_parts)>0:
+					details.append(
+						'   '.join(stat_parts)
+					)
+
+				if 'common_preceding_motif' in row.index:
+
+					value=row['common_preceding_motif']
+
+					if pd.notna(value):
+						details.append(
+							'Common preceding motif: '
+							+str(value)
+						)
+
+				if 'common_following_motif' in row.index:
+
+					value=row['common_following_motif']
+
+					if pd.notna(value):
+						details.append(
+							'Common following motif: '
+							+str(value)
+						)
+
+				if 'representative_intervals' in row.index:
+
+					value=row['representative_intervals']
+
+					if pd.notna(value):
+						details.append(
+							'Representative intervals: '
+							+str(value)
+						)
+
+				if len(details)==0:
+					details.append(
+						'No additional motif statistics available.'
+					)
+
+				text=wx.StaticText(
+					scrolled,
+					label='\n'.join(details),
+				)
+
+				text.Wrap(800)
+
+				box_sizer.Add(
+					text,
+					0,
+					wx.ALL|wx.EXPAND,
+					8,
+				)
+
+				name_row=wx.BoxSizer(wx.HORIZONTAL)
+
+				name_label=wx.StaticText(
+					scrolled,
+					label='User-defined motif name:',
+				)
+
+				default_name='Motif '+str(motif_id)
+
+				if 'motif_name' in row.index:
+
+					existing_name=row['motif_name']
+
+					if pd.notna(existing_name):
+						default_name=str(existing_name)
+
+				name_control=wx.TextCtrl(
+					scrolled,
+					value=default_name,
+				)
+
+				self.name_controls[
+					int(motif_id)
+				]=name_control
+
+				name_row.Add(
+					name_label,
+					0,
+					wx.ALIGN_CENTER_VERTICAL|wx.RIGHT,
+					8,
+				)
+
+				name_row.Add(
+					name_control,
+					1,
+					wx.EXPAND,
+				)
+
+				box_sizer.Add(
+					name_row,
+					0,
+					wx.LEFT|wx.RIGHT|wx.BOTTOM|wx.EXPAND,
+					8,
+				)
+
+				motif_sizer.Add(
+					box_sizer,
+					0,
+					wx.ALL|wx.EXPAND,
+					8,
+				)
+
+			scrolled.SetSizer(motif_sizer)
+
+			main_sizer.Add(
+				scrolled,
+				1,
+				wx.LEFT|wx.RIGHT|wx.EXPAND,
+				8,
+			)
+
+			button_sizer=self.CreateSeparatedButtonSizer(
+				wx.OK|wx.CANCEL
+			)
+
+			main_sizer.Add(
+				button_sizer,
+				0,
+				wx.ALL|wx.EXPAND,
+				10,
+			)
+
+			self.SetSizer(main_sizer)
+			self.Layout()
+			self.Centre()
+
+
+		def _get_motif_id(self,row):
+
+			if 'motif_id' in row.index:
+
+				try:
+					return int(row['motif_id'])
+
+				except (TypeError,ValueError):
+					pass
+
+			return int(row.name)+1
+
+
+		def get_names(self):
+
+			motif_names={}
+
+			for motif_id,control in self.name_controls.items():
+
+				name=control.GetValue().strip()
+
+				if len(name)==0:
+					raise ValueError(
+						'Motif '
+						+str(motif_id)
+						+' must have a name.'
+					)
+
+				motif_names[
+					int(motif_id)
+				]=name
+
+			name_values=[
+				name.lower()
+				for name in motif_names.values()
+			]
+
+			if len(name_values)!=len(set(name_values)):
+
+				raise ValueError(
+					'Each motif must have a unique name.'
+				)
+
+			return motif_names
+
+
+
+	def __init__(self,parent):
+
+		super().__init__(parent)
+
+		self.notebook=parent
+
+		self.path_to_events=None
+		self.result_path=None
+
+		self.behavior_names=[]
+		self.number_of_ids=0
+		self.number_of_frames=0
+
+		self.n_motifs=4
+
+		self.random_seed=42
+		self.max_iter=200
+		self.tol=1e-4
+		self.top_n_behaviors=3
+
+		# Sliding-window motif composition options.
+		self.window_size=30
+		self.window_step=5
+
+		self.display_window()
+
+
+
+	def display_window(self):
+
+		panel=self
+
+		boxsizer=wx.BoxSizer(wx.VERTICAL)
+
+		# -----------------------------------------------------
+		# Input file
+		# -----------------------------------------------------
+
+		module_input=wx.BoxSizer(wx.HORIZONTAL)
+
+		button_input=wx.Button(
+			panel,
+			label='Select an all_event_probability\nfile',
+			size=(300,40),
+		)
+
+		button_input.Bind(
+			wx.EVT_BUTTON,
+			self.select_events_file,
+		)
+
+		wx.Button.SetToolTip(
+			button_input,
+			(
+				'Select an all_event_probability.xlsx file '
+				'generated by LabGym behavior analysis.'
+			),
+		)
+
+		self.text_input=wx.StaticText(
+			panel,
+			label='None.',
+			style=wx.ALIGN_LEFT|wx.ST_ELLIPSIZE_END,
+		)
+
+		module_input.Add(
+			button_input,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		module_input.Add(
+			self.text_input,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			0,
+			10,
+			0,
+		)
+
+		boxsizer.Add(
+			module_input,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			0,
+			5,
+			0,
+		)
+
+		# -----------------------------------------------------
+		# Output folder
+		# -----------------------------------------------------
+
+		module_output=wx.BoxSizer(wx.HORIZONTAL)
+
+		button_output=wx.Button(
+			panel,
+			label='Select a folder to store\nthe motif results',
+			size=(300,40),
+		)
+
+		button_output.Bind(
+			wx.EVT_BUTTON,
+			self.select_outpath,
+		)
+
+		wx.Button.SetToolTip(
+			button_output,
+			'Select a folder for behavioral motif outputs.',
+		)
+
+		self.text_output=wx.StaticText(
+			panel,
+			label='None.',
+			style=wx.ALIGN_LEFT|wx.ST_ELLIPSIZE_END,
+		)
+
+		module_output.Add(
+			button_output,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		module_output.Add(
+			self.text_output,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			module_output,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			0,
+			5,
+			0,
+		)
+
+		# -----------------------------------------------------
+		# Number of motifs
+		# -----------------------------------------------------
+
+		module_number=wx.BoxSizer(wx.HORIZONTAL)
+
+		button_number=wx.Button(
+			panel,
+			label='Specify the number of\nbehavioral motifs',
+			size=(300,40),
+		)
+
+		button_number.Bind(
+			wx.EVT_BUTTON,
+			self.specify_number_of_motifs,
+		)
+
+		wx.Button.SetToolTip(
+			button_number,
+			(
+				'Specify how many latent behavioral motifs '
+				'the model should infer.'
+			),
+		)
+
+		self.text_number=wx.StaticText(
+			panel,
+			label='Default: 4 motifs.',
+			style=wx.ALIGN_LEFT|wx.ST_ELLIPSIZE_END,
+		)
+
+		module_number.Add(
+			button_number,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		module_number.Add(
+			self.text_number,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			module_number,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			0,
+			5,
+			0,
+		)
+
+		# -----------------------------------------------------
+		# Model options
+		# -----------------------------------------------------
+
+		module_options=wx.BoxSizer(wx.HORIZONTAL)
+
+		button_options=wx.Button(
+			panel,
+			label='Set motif model\noptions',
+			size=(300,40),
+		)
+
+		button_options.Bind(
+			wx.EVT_BUTTON,
+			self.set_model_options,
+		)
+
+		wx.Button.SetToolTip(
+			button_options,
+			(
+				'Configure the sliding-window motif model. '
+				'Window size controls the temporal context used '
+				'to identify recurring behavioral compositions.'
+			),
+		)
+
+		self.text_options=wx.StaticText(
+			panel,
+			label=(
+				'Defaults: window='
+				+str(self.window_size)
+				+' frames, step='
+				+str(self.window_step)
+				+', seed='
+				+str(self.random_seed)
+				+', max iterations='
+				+str(self.max_iter)
+				+', top behaviors='
+				+str(self.top_n_behaviors)
+				+'.'
+			),
+			style=wx.ALIGN_LEFT|wx.ST_ELLIPSIZE_END,
+		)
+
+		module_options.Add(
+			button_options,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		module_options.Add(
+			self.text_options,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			module_options,
+			0,
+			wx.LEFT|wx.RIGHT|wx.EXPAND,
+			10,
+		)
+
+		boxsizer.Add(
+			0,
+			15,
+			0,
+		)
+
+		# -----------------------------------------------------
+		# Run
+		# -----------------------------------------------------
+
+		button_generate=wx.Button(
+			panel,
+			label='Discover behavioral motifs',
+			size=(300,40),
+		)
+
+		button_generate.Bind(
+			wx.EVT_BUTTON,
+			self.generate_motifs,
+		)
+
+		wx.Button.SetToolTip(
+			button_generate,
+			(
+				'Fit the behavioral motif model, generate '
+				'summary statistics and visualizations, '
+				'and review the inferred motifs.'
+			),
+		)
+
+		boxsizer.Add(
+			button_generate,
+			0,
+			wx.RIGHT|wx.ALIGN_RIGHT,
+			90,
+		)
+
+		boxsizer.Add(
+			0,
+			10,
+			0,
+		)
+
+		panel.SetSizer(boxsizer)
+
+		self.Centre()
+		self.Show(True)
+
+
+
+	def select_events_file(self,event):
+
+		wildcard=(
+			'Excel files (*.xlsx;*.xls)|*.xlsx;*.xls'
+		)
+
+		dialog=wx.FileDialog(
+			self,
+			'Select all_event_probability.xlsx',
+			'',
+			'',
+			wildcard,
+			style=wx.FD_OPEN|wx.FD_FILE_MUST_EXIST,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+
+			path=dialog.GetPath()
+
+			try:
+
+				event_probability,time_points,behavior_names=(
+					parse_all_events_file(path)
+				)
+
+				self.path_to_events=path
+
+				self.behavior_names=list(
+					behavior_names
+				)
+
+				self.number_of_frames=len(
+					time_points
+				)
+
+				if isinstance(
+					event_probability,
+					dict,
+				):
+
+					self.number_of_ids=len(
+						event_probability
+					)
+
+				elif isinstance(
+					event_probability,
+					(list,tuple),
+				):
+
+					if len(event_probability)==0:
+
+						self.number_of_ids=0
+
+					else:
+
+						first=event_probability[0]
+
+						if isinstance(
+							first,
+							(list,tuple,np.ndarray),
+						):
+
+							self.number_of_ids=len(
+								event_probability
+							)
+
+						else:
+
+							self.number_of_ids=1
+
+				else:
+
+					self.number_of_ids=1
+
+				self.text_input.SetLabel(
+					'Selected: '
+					+self.path_to_events
+					+'; '
+					+str(self.number_of_ids)
+					+' ID(s), '
+					+str(self.number_of_frames)
+					+' frames, '
+					+str(len(self.behavior_names))
+					+' behaviors.'
+				)
+
+			except Exception as error:
+
+				self.path_to_events=None
+
+				wx.MessageBox(
+					(
+						'Could not read the selected '
+						'LabGym event file:\n\n'
+						+str(error)
+					),
+					'Invalid input file',
+					wx.OK|wx.ICON_ERROR,
+				)
+
+		dialog.Destroy()
+
+
+
+	def select_outpath(self,event):
+
+		dialog=wx.DirDialog(
+			self,
+			'Select a directory',
+			'',
+			style=wx.DD_DEFAULT_STYLE,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+
+			self.result_path=dialog.GetPath()
+
+			self.text_output.SetLabel(
+				'Results will be in: '
+				+self.result_path
+				+'.'
+			)
+
+		dialog.Destroy()
+
+
+
+	def specify_number_of_motifs(self,event):
+
+		dialog=wx.NumberEntryDialog(
+			self,
+			(
+				'Specify how many behavioral motifs '
+				'should be inferred.'
+			),
+			'Number of motifs:',
+			'Behavioral motifs',
+			self.n_motifs,
+			2,
+			100,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+
+			self.n_motifs=int(
+				dialog.GetValue()
+			)
+
+			self.text_number.SetLabel(
+				'Number of motifs: '
+				+str(self.n_motifs)
+				+'.'
+			)
+
+		dialog.Destroy()
+
+
+
+	def set_model_options(self,event):
+
+		dialog=wx.NumberEntryDialog(
+			self,
+			(
+				'Number of consecutive frames included '
+				'in each behavioral composition window.'
+			),
+			'Window size (frames):',
+			'Motif window size',
+			self.window_size,
+			2,
+			1000000,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+			self.window_size=int(
+				dialog.GetValue()
+			)
+
+		dialog.Destroy()
+
+		dialog=wx.NumberEntryDialog(
+			self,
+			(
+				'Number of frames between the starts '
+				'of two consecutive windows.'
+			),
+			'Window step (frames):',
+			'Motif window step',
+			self.window_step,
+			1,
+			1000000,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+			self.window_step=int(
+				dialog.GetValue()
+			)
+
+		dialog.Destroy()
+
+		dialog=wx.NumberEntryDialog(
+			self,
+			(
+				'Random seed used for reproducible '
+				'model initialization.'
+			),
+			'Random seed:',
+			'Random seed',
+			self.random_seed,
+			0,
+			2147483647,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+			self.random_seed=int(
+				dialog.GetValue()
+			)
+
+		dialog.Destroy()
+
+		dialog=wx.NumberEntryDialog(
+			self,
+			'Maximum number of model-fitting iterations.',
+			'Maximum iterations:',
+			'Maximum iterations',
+			self.max_iter,
+			1,
+			100000,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+			self.max_iter=int(
+				dialog.GetValue()
+			)
+
+		dialog.Destroy()
+
+		dialog=wx.NumberEntryDialog(
+			self,
+			(
+				'Number of representative behaviors '
+				'listed for each motif.'
+			),
+			'Top behaviors:',
+			'Representative behaviors',
+			self.top_n_behaviors,
+			1,
+			100,
+		)
+
+		if dialog.ShowModal()==wx.ID_OK:
+			self.top_n_behaviors=int(
+				dialog.GetValue()
+			)
+
+		dialog.Destroy()
+
+		self.text_options.SetLabel(
+			'Options: window='
+			+str(self.window_size)
+			+' frames, step='
+			+str(self.window_step)
+			+', seed='
+			+str(self.random_seed)
+			+', max iterations='
+			+str(self.max_iter)
+			+', top behaviors='
+			+str(self.top_n_behaviors)
+			+'.'
+		)
+
+
+
+	def generate_motifs(self,event):
+
+		if self.path_to_events is None:
+
+			wx.MessageBox(
+				'Please select an all_event_probability file.',
+				'Error',
+				wx.OK|wx.ICON_ERROR,
+			)
+
+			return
+
+		if self.result_path is None:
+
+			wx.MessageBox(
+				'Please select an output folder.',
+				'Error',
+				wx.OK|wx.ICON_ERROR,
+			)
+
+			return
+
+		if (
+			self.number_of_frames>0
+			and self.window_size>self.number_of_frames
+		):
+
+			wx.MessageBox(
+				(
+					'The motif window size cannot be larger '
+					'than the analyzed sequence.\n\n'
+					'Frames: '
+					+str(self.number_of_frames)
+					+'\nWindow size: '
+					+str(self.window_size)
+				),
+				'Invalid motif options',
+				wx.OK|wx.ICON_ERROR,
+			)
+
+			return
+
+		try:
+
+			event_probability,time_points,behavior_names=(
+				parse_all_events_file(
+					self.path_to_events
+				)
+			)
+
+			results=discover_behavioral_motifs(
+				event_probability=event_probability,
+				time_points=time_points,
+				behavior_names=behavior_names,
+				output_folder=self.result_path,
+				n_motifs=self.n_motifs,
+				random_seed=self.random_seed,
+				max_iter=self.max_iter,
+				tol=self.tol,
+				top_n_behaviors=self.top_n_behaviors,
+				window_size=self.window_size,
+				window_step=self.window_step,
+			)
+
+		except Exception as error:
+
+			logger.exception(
+				'Behavioral motif discovery failed.'
+			)
+
+			wx.MessageBox(
+				(
+					'Failed to discover behavioral motifs:\n\n'
+					+str(error)
+				),
+				'Error',
+				wx.OK|wx.ICON_ERROR,
+			)
+
+			return
+
+		# -----------------------------------------------------
+		# Review and name each animal's motifs.
+		# -----------------------------------------------------
+
+		for animal_id,result in results.items():
+
+			while True:
+
+				dialog=self._MotifReviewDialog(
+					self,
+					animal_id,
+					result['summary'],
+				)
+
+				status=dialog.ShowModal()
+
+				if status!=wx.ID_OK:
+
+					dialog.Destroy()
+					break
+
+				try:
+
+					motif_names=dialog.get_names()
+
+				except ValueError as error:
+
+					dialog.Destroy()
+
+					wx.MessageBox(
+						str(error),
+						'Invalid motif names',
+						wx.OK|wx.ICON_ERROR,
+					)
+
+					continue
+
+				dialog.Destroy()
+
+				try:
+
+					apply_motif_names(
+						self.result_path,
+						animal_id,
+						motif_names,
+					)
+
+				except Exception as error:
+
+					logger.exception(
+						(
+							'Failed to apply motif names '
+							'for animal ID %s.'
+						),
+						animal_id,
+					)
+
+					wx.MessageBox(
+						(
+							'Motif discovery completed, but '
+							'the user-defined motif names could '
+							'not be applied to every output:\n\n'
+							+str(error)
+						),
+						'Motif naming/export error',
+						wx.OK|wx.ICON_WARNING,
+					)
+
+				break
+
+		wx.MessageBox(
+			(
+				'Behavioral motif discovery completed.\n\n'
+				'Generated outputs include:\n'
+				'- motif summary\n'
+				'- frame-level motif assignments\n'
+				'- sliding-window assignments\n'
+				'- motif transition probabilities\n'
+				'- motif timeline\n'
+				'- motif composition heatmap\n'
+				'- fitted model data'
+			),
+			'Done',
+			wx.OK|wx.ICON_INFORMATION,
+		)
