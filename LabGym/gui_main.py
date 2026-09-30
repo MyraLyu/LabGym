@@ -48,7 +48,7 @@ from .gui_categorizer import PanelLv2_GenerateExamples,PanelLv2_TrainCategorizer
 logger.debug('importing %s done', '.gui_categorizer')
 from .gui_detector import PanelLv2_GenerateImages,PanelLv2_TrainDetectors,PanelLv2_TestDetectors
 from .gui_preprocessor import PanelLv2_ProcessVideos,PanelLv2_DrawMarkers
-from .gui_analyzer import PanelLv2_AnalyzeBehaviors,PanelLv2_MineResults,PanelLv2_PlotBehaviors,PanelLv2_CalculateDistances, PanelLv2_StateTransitionMap
+from .gui_analyzer import PanelLv2_AnalyzeBehaviors,PanelLv2_MineResults,PanelLv2_PlotBehaviors,PanelLv2_CalculateDistances, PanelLv2_StateTransitionMap, PanelLv2_BehavioralMotifDiscovery
 from LabGym import selftest
 
 
@@ -328,7 +328,17 @@ class PanelLv1_AnalysisModule(wx.Panel):
 		button_calculatedistances.Bind(wx.EVT_BUTTON,self.calculate_distances)
 		wx.Button.SetToolTip(button_calculatedistances,'Using LabGym analysis results to calculate: 1. The shortest distances among the locations where animals perform the selected behaviors for the first time, in chronological order. 2. The total traveling distances of the actual route the animals.')
 		boxsizer.Add(button_calculatedistances,0,wx.ALIGN_CENTER,10)
-		boxsizer.Add(0,30,0)
+		boxsizer.Add(0,20,0)
+
+		button_behavioralmotifs=wx.Button(panel, label='Behavioral Motif Discovery', size=(300,40))
+		button_behavioralmotifs.Bind(wx.EVT_BUTTON, self.behavioral_motif_discovery)
+
+		wx.Button.SetToolTip(button_behavioralmotifs,
+		                     'Discover recurring behavioral motifs from completed '
+							 'LabGym behavior analysis results.')
+
+		boxsizer.Add(button_behavioralmotifs, 0, wx.ALIGN_CENTER, 10)
+		boxsizer.Add(0, 30, 0)
 
 		panel.SetSizer(boxsizer)
 
@@ -371,6 +381,19 @@ class PanelLv1_AnalysisModule(wx.Panel):
 			self.notebook,
 			lambda: PanelLv2_StateTransitionMap(self.notebook),
 			title
+		)
+
+	def behavioral_motif_discovery(self,event):
+		"""Open the Behavioral Motif Discovery panel."""
+
+		title='Behavioral Motif Discovery'
+
+		add_or_select_notebook_page(
+			self.notebook,
+			lambda: PanelLv2_BehavioralMotifDiscovery(
+				self.notebook
+			),
+			title,
 		)
 
 # Popup content for each clickable workflow-map box: (section_title, box_title, description, guide_sections)
