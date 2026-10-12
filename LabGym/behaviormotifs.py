@@ -4,33 +4,36 @@ Behavioral motif discovery for LabGym.
 This module performs post-analysis behavioral motif discovery using
 sliding-window behavior compositions and a Gaussian Hidden Markov Model.
 
-The fitted latent states are interpreted as behavioral motifs.
+The HMM identifies latent temporal states ("behavioral motifs") from
+local behavior-composition vectors. User-defined sequence constraints
+are applied after HMM inference to individual motif occurrences.
+
+Sequence constraints do NOT alter or refit the HMM.
 
 Outputs include:
 - motif summary table
 - frame-level motif assignments
 - sliding-window motif assignments
-- motif composition probabilities
+- motif behavior composition
 - motif transition probabilities
 - motif timeline
 - motif composition heatmap
 - fitted model arrays
 - metadata
 
-Motif names may subsequently be assigned by the user with
-apply_motif_names(). User-defined names do not alter the fitted model.
+User-defined motif names may subsequently be assigned with
+apply_motif_names().
 '''
 
 
-# Standard library imports.
+# ============================================================
+# Imports
+# ============================================================
+
 from collections import Counter
 import json
-import math
-import os
 from pathlib import Path
 
-
-# Related third party imports.
 import matplotlib
 matplotlib.use('Agg')
 
@@ -39,17 +42,17 @@ import numpy as np
 import pandas as pd
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Numerical utilities
-# ---------------------------------------------------------------------
+# ============================================================
 
 
 def _logsumexp(values, axis=None):
-	'''
-	Numerically stable log(sum(exp(values))).
-	'''
 
-	values=np.asarray(values,dtype=float)
+	values=np.asarray(
+		values,
+		dtype=float,
+	)
 
 	max_value=np.max(
 		values,
@@ -67,7 +70,9 @@ def _logsumexp(values, axis=None):
 		max_value
 		+np.log(
 			np.sum(
-				np.exp(values-max_value),
+				np.exp(
+					values-max_value
+				),
 				axis=axis,
 				keepdims=True,
 			)
@@ -76,6 +81,7 @@ def _logsumexp(values, axis=None):
 	)
 
 	if axis is not None:
+
 		result=np.squeeze(
 			result,
 			axis=axis,
@@ -86,9 +92,6 @@ def _logsumexp(values, axis=None):
 
 
 def _normalize(vector):
-	'''
-	Normalize a vector so that it sums to one.
-	'''
 
 	vector=np.asarray(
 		vector,
@@ -103,16 +106,17 @@ def _normalize(vector):
 	total=vector.sum()
 
 	if total<=0:
-		return np.ones_like(vector)/len(vector)
+
+		return (
+			np.ones_like(vector)
+			/len(vector)
+		)
 
 	return vector/total
 
 
 
 def _normalize_rows(matrix):
-	'''
-	Normalize every matrix row so that it sums to one.
-	'''
 
 	matrix=np.asarray(
 		matrix,
@@ -129,22 +133,25 @@ def _normalize_rows(matrix):
 		keepdims=True,
 	)
 
-	row_sums[row_sums<=0]=1.0
+	row_sums[
+		row_sums<=0
+	]=1.0
 
 	return matrix/row_sums
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Gaussian HMM
-# ---------------------------------------------------------------------
+# ============================================================
 
 
 class GaussianHMM:
-	'''
-	Simple diagonal-covariance Gaussian Hidden Markov Model.
 
-	This implementation avoids an additional hmmlearn dependency and is
-	sufficient for low-dimensional sliding-window behavior compositions.
+	'''
+	Diagonal-covariance Gaussian Hidden Markov Model.
+
+	The observation at each HMM time step is a sliding-window
+	behavior-composition vector.
 	'''
 
 
@@ -158,13 +165,29 @@ class GaussianHMM:
 		min_covar=1e-4,
 	):
 
-		self.n_states=int(n_states)
-		self.n_features=int(n_features)
+		self.n_states=int(
+			n_states
+		)
 
-		self.random_seed=int(random_seed)
-		self.max_iter=int(max_iter)
-		self.tol=float(tol)
-		self.min_covar=float(min_covar)
+		self.n_features=int(
+			n_features
+		)
+
+		self.random_seed=int(
+			random_seed
+		)
+
+		self.max_iter=int(
+			max_iter
+		)
+
+		self.tol=float(
+			tol
+		)
+
+		self.min_covar=float(
+			min_covar
+		)
 
 		self.startprob_=None
 		self.transmat_=None
@@ -175,10 +198,7 @@ class GaussianHMM:
 
 
 
-	def _initialize(self,X):
-		'''
-		Initialize HMM parameters reproducibly.
-		'''
+	def _initialize(self, X):
 
 		X=np.asarray(
 			X,
@@ -207,14 +227,12 @@ class GaussianHMM:
 			self.startprob_
 		)
 
-		# Initialize with strong self-transition probabilities so that
-		# inferred motifs naturally persist over consecutive windows.
-		self.transmat_=np.full(
+		# Favor persistence during initialization.
+		self.transmat_=np.ones(
 			(
 				self.n_states,
 				self.n_states,
 			),
-			1.0,
 			dtype=float,
 		)
 
@@ -227,7 +245,6 @@ class GaussianHMM:
 			self.transmat_
 		)
 
-		# Choose reproducible observations as initial state means.
 		indices=rng.choice(
 			n_samples,
 			size=self.n_states,
@@ -258,10 +275,7 @@ class GaussianHMM:
 
 
 
-	def _log_emission_probability(self,X):
-		'''
-		Return log p(x_t | z_t=m) for every frame/window and motif.
-		'''
+	def _log_emission_probability(self, X):
 
 		X=np.asarray(
 			X,
@@ -278,26 +292,42 @@ class GaussianHMM:
 			dtype=float,
 		)
 
-		for state in range(self.n_states):
+		for state in range(
+			self.n_states
+		):
 
 			variance=np.maximum(
-				self.covars_[state],
+				self.covars_[
+					state
+				],
 				self.min_covar,
 			)
 
-			diff=X-self.means_[state]
+			diff=(
+				X
+				-self.means_[
+					state
+				]
+			)
 
-			result[:,state]=(
+			result[
+				:,
+				state,
+			]=(
 				-0.5
 				*(
-					self.n_features*np.log(
+					self.n_features
+					*np.log(
 						2.0*np.pi
 					)
 					+np.sum(
-						np.log(variance)
+						np.log(
+							variance
+						)
 					)
 					+np.sum(
-						(diff*diff)/variance,
+						(diff*diff)
+						/variance,
 						axis=1,
 					)
 				)
@@ -307,19 +337,20 @@ class GaussianHMM:
 
 
 
-	def _forward(self,log_emission):
-		'''
-		Log-space forward algorithm.
-		'''
+	def _forward(self, log_emission):
 
-		n_samples=len(log_emission)
+		n_samples=len(
+			log_emission
+		)
 
 		log_start=np.log(
-			self.startprob_+1e-300
+			self.startprob_
+			+1e-300
 		)
 
 		log_transition=np.log(
-			self.transmat_+1e-300
+			self.transmat_
+			+1e-300
 		)
 
 		alpha=np.zeros(
@@ -343,7 +374,9 @@ class GaussianHMM:
 			alpha[t]=(
 				log_emission[t]
 				+_logsumexp(
-					alpha[t-1][:,None]
+					alpha[
+						t-1
+					][:,None]
 					+log_transition,
 					axis=0,
 				)
@@ -355,19 +388,22 @@ class GaussianHMM:
 			)
 		)
 
-		return alpha,log_likelihood
+		return (
+			alpha,
+			log_likelihood,
+		)
 
 
 
-	def _backward(self,log_emission):
-		'''
-		Log-space backward algorithm.
-		'''
+	def _backward(self, log_emission):
 
-		n_samples=len(log_emission)
+		n_samples=len(
+			log_emission
+		)
 
 		log_transition=np.log(
-			self.transmat_+1e-300
+			self.transmat_
+			+1e-300
 		)
 
 		beta=np.zeros(
@@ -386,8 +422,12 @@ class GaussianHMM:
 
 			beta[t]=_logsumexp(
 				log_transition
-				+log_emission[t+1][None,:]
-				+beta[t+1][None,:],
+				+log_emission[
+					t+1
+				][None,:]
+				+beta[
+					t+1
+				][None,:],
 				axis=1,
 			)
 
@@ -395,10 +435,7 @@ class GaussianHMM:
 
 
 
-	def fit(self,X):
-		'''
-		Fit the HMM using Baum-Welch expectation maximization.
-		'''
+	def fit(self, X):
 
 		X=np.asarray(
 			X,
@@ -408,17 +445,20 @@ class GaussianHMM:
 		if X.ndim!=2:
 
 			raise ValueError(
-				'Gaussian HMM input must be a 2-dimensional matrix.'
+				'Gaussian HMM input must be a '
+				'2-dimensional matrix.'
 			)
 
 		if X.shape[1]!=self.n_features:
 
 			raise ValueError(
-				'Gaussian HMM feature dimension does not match '
-				'the requested feature dimension.'
+				'Gaussian HMM feature dimension does '
+				'not match n_features.'
 			)
 
-		self._initialize(X)
+		self._initialize(
+			X
+		)
 
 		self.log_likelihood_history_=[]
 
@@ -429,7 +469,9 @@ class GaussianHMM:
 		):
 
 			log_emission=(
-				self._log_emission_probability(X)
+				self._log_emission_probability(
+					X
+				)
 			)
 
 			alpha,log_likelihood=(
@@ -452,12 +494,15 @@ class GaussianHMM:
 				log_gamma
 			)
 
-			gamma=gamma/np.maximum(
-				gamma.sum(
-					axis=1,
-					keepdims=True,
-				),
-				1e-300,
+			gamma=(
+				gamma
+				/np.maximum(
+					gamma.sum(
+						axis=1,
+						keepdims=True,
+					),
+					1e-300,
+				)
 			)
 
 			xi_sum=np.zeros(
@@ -469,7 +514,8 @@ class GaussianHMM:
 			)
 
 			log_transition=np.log(
-				self.transmat_+1e-300
+				self.transmat_
+				+1e-300
 			)
 
 			for t in range(
@@ -477,10 +523,16 @@ class GaussianHMM:
 			):
 
 				log_xi=(
-					alpha[t][:,None]
+					alpha[
+						t
+					][:,None]
 					+log_transition
-					+log_emission[t+1][None,:]
-					+beta[t+1][None,:]
+					+log_emission[
+						t+1
+					][None,:]
+					+beta[
+						t+1
+					][None,:]
 					-log_likelihood
 				)
 
@@ -490,17 +542,18 @@ class GaussianHMM:
 
 				xi_sum+=xi
 
-			# Update start probabilities.
+			# Start probabilities.
 			self.startprob_=_normalize(
-				gamma[0]+1e-8
+				gamma[0]
+				+1e-8
 			)
 
-			# Update transition probabilities.
+			# Transition probabilities.
 			self.transmat_=_normalize_rows(
-				xi_sum+1e-8
+				xi_sum
+				+1e-8
 			)
 
-			# Update Gaussian parameters.
 			state_weights=np.maximum(
 				gamma.sum(
 					axis=0
@@ -525,30 +578,47 @@ class GaussianHMM:
 					state,
 				][:,None]
 
-				new_means[state]=(
-					(weights*X).sum(
+				new_means[
+					state
+				]=(
+					(
+						weights
+						*X
+					).sum(
 						axis=0
 					)
-					/state_weights[state]
+					/state_weights[
+						state
+					]
 				)
 
 				diff=(
 					X
-					-new_means[state]
+					-new_means[
+						state
+					]
 				)
 
-				new_covars[state]=(
+				new_covars[
+					state
+				]=(
 					(
 						weights
 						*(diff*diff)
 					).sum(
 						axis=0
 					)
-					/state_weights[state]
+					/state_weights[
+						state
+					]
 				)
 
-				new_covars[state]=np.maximum(
-					new_covars[state],
+				new_covars[
+					state
+				]=np.maximum(
+					new_covars[
+						state
+					],
 					self.min_covar,
 				)
 
@@ -556,7 +626,9 @@ class GaussianHMM:
 			self.covars_=new_covars
 
 			self.log_likelihood_history_.append(
-				float(log_likelihood)
+				float(
+					log_likelihood
+				)
 			)
 
 			if previous_log_likelihood is not None:
@@ -566,7 +638,10 @@ class GaussianHMM:
 					-previous_log_likelihood
 				)
 
-				if abs(improvement)<self.tol:
+				if abs(
+					improvement
+				)<self.tol:
+
 					break
 
 			previous_log_likelihood=(
@@ -577,9 +652,10 @@ class GaussianHMM:
 
 
 
-	def predict(self,X):
+	def predict(self, X):
+
 		'''
-		Decode the most likely state sequence with Viterbi.
+		Viterbi decoding.
 		'''
 
 		X=np.asarray(
@@ -588,15 +664,19 @@ class GaussianHMM:
 		)
 
 		log_emission=(
-			self._log_emission_probability(X)
+			self._log_emission_probability(
+				X
+			)
 		)
 
 		log_start=np.log(
-			self.startprob_+1e-300
+			self.startprob_
+			+1e-300
 		)
 
 		log_transition=np.log(
-			self.transmat_+1e-300
+			self.transmat_
+			+1e-300
 		)
 
 		n_samples=len(X)
@@ -628,11 +708,15 @@ class GaussianHMM:
 		):
 
 			candidates=(
-				score[t-1][:,None]
+				score[
+					t-1
+				][:,None]
 				+log_transition
 			)
 
-			backpointer[t]=np.argmax(
+			backpointer[
+				t
+			]=np.argmax(
 				candidates,
 				axis=0,
 			)
@@ -662,43 +746,39 @@ class GaussianHMM:
 			-1,
 		):
 
-			states[t]=backpointer[
-				t+1,
-				states[t+1],
-			]
+			states[t]=(
+				backpointer[
+					t+1,
+					states[
+						t+1
+					],
+				]
+			)
 
 		return states
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Input preparation
-# ---------------------------------------------------------------------
+# ============================================================
 
 
-def _prepare_event_sequences(event_probability):
+def _prepare_event_sequences(
+	event_probability
+):
+
 	'''
-	Normalize LabGym event input into a list of (animal_id, events).
-
-	Supported structures:
-
-	{
-		0: [...],
-		1: [...],
-	}
+	Normalize LabGym event input into:
 
 	[
-		[...],
-		[...],
-	]
-
-	or a flat sequence:
-
-	[
-		'walking',
-		'walking',
-		'sniffing',
+		(animal_id, event_sequence),
 		...
 	]
+
+	Supported:
+	- dict
+	- nested list
+	- flat list
 	'''
 
 	if event_probability is None:
@@ -712,7 +792,9 @@ def _prepare_event_sequences(event_probability):
 		dict,
 	):
 
-		if len(event_probability)==0:
+		if len(
+			event_probability
+		)==0:
 
 			raise ValueError(
 				'No behavioral event data were found.'
@@ -731,7 +813,9 @@ def _prepare_event_sequences(event_probability):
 		),
 	):
 
-		if len(event_probability)==0:
+		if len(
+			event_probability
+		)==0:
 
 			raise ValueError(
 				'No behavioral event data were found.'
@@ -739,78 +823,141 @@ def _prepare_event_sequences(event_probability):
 
 		first=event_probability[0]
 
-		# Flat list = one animal.
-		if (
-			first is None
-			or isinstance(
-				first,
-				(
-					str,
-					int,
-					float,
-					np.integer,
-					np.floating,
-				),
-			)
+		# LabGym single-animal sequence can itself contain
+		# [behavior, probability] pairs.
+		if isinstance(
+			first,
+			(
+				list,
+				tuple,
+				np.ndarray,
+			),
 		):
 
-			return [
-				(
-					0,
-					list(
-						event_probability
-					),
+			if (
+				len(first)>=1
+				and (
+					len(first)==2
+					and isinstance(
+						first[0],
+						(
+							str,
+							type(None),
+						),
+					)
 				)
-			]
+			):
 
-		# Nested list = multiple animals.
-		return list(
-			enumerate(
-				event_probability
+				return [
+					(
+						0,
+						list(
+							event_probability
+						),
+					)
+				]
+
+			# Otherwise assume nested animal sequences.
+			return list(
+				enumerate(
+					event_probability
+				)
 			)
-		)
+
+		# Flat behavior sequence.
+		return [
+			(
+				0,
+				list(
+					event_probability
+				),
+			)
+		]
 
 	raise TypeError(
-		'Behavior event input must be a dictionary, list, '
-		'tuple, or numpy array; received '
-		+type(event_probability).__name__
-		+'.'
+		'Behavior event input must be a dictionary, '
+		'list, tuple, or numpy array.'
 	)
 
 
 
 def _fill_missing_behaviors(events):
-	'''
-	Fill missing / NA behavior labels.
 
-	Missing labels are first forward-filled and then backward-filled.
-	If an entire sequence is missing, an error is raised.
+	'''
+	Convert LabGym event entries to clean behavior labels.
+
+	LabGym entries may look like:
+
+	['sniffing', 0.95]
+	['NA', -1]
+
+	Missing values are forward-filled and then backward-filled.
 	'''
 
-	events=list(events)
+	events=list(
+		events
+	)
 
 	cleaned=[]
 
 	for event in events:
 
-		if event is None:
+		# LabGym native format:
+		# [behavior_name, probability]
+		if isinstance(
+			event,
+			(
+				list,
+				tuple,
+				np.ndarray,
+			),
+		):
 
-			cleaned.append(None)
+			if len(event)==0:
+
+				cleaned.append(
+					None
+				)
+
+				continue
+
+			behavior=event[0]
+
+		else:
+
+			behavior=event
+
+		if behavior is None:
+
+			cleaned.append(
+				None
+			)
+
 			continue
 
 		if isinstance(
-			event,
-			float,
+			behavior,
+			(
+				float,
+				np.floating,
+			),
 		):
 
-			if np.isnan(event):
+			if np.isnan(
+				behavior
+			):
 
-				cleaned.append(None)
+				cleaned.append(
+					None
+				)
+
 				continue
 
-		value=str(event).strip()
+		behavior=str(
+			behavior
+		).strip()
 
-		if value.lower() in {
+		if behavior.lower() in {
 			'',
 			'na',
 			'nan',
@@ -818,21 +965,28 @@ def _fill_missing_behaviors(events):
 			'null',
 		}:
 
-			cleaned.append(None)
+			cleaned.append(
+				None
+			)
 
 		else:
 
-			cleaned.append(value)
+			cleaned.append(
+				behavior
+			)
 
 	missing_count=sum(
 		value is None
 		for value in cleaned
 	)
 
-	if missing_count==len(cleaned):
+	if missing_count==len(
+		cleaned
+	):
 
 		raise ValueError(
-			'The behavior sequence contains no valid behavior labels.'
+			'The behavior sequence contains no '
+			'valid behavior labels.'
 		)
 
 	# Forward fill.
@@ -845,7 +999,10 @@ def _fill_missing_behaviors(events):
 		if value is None:
 
 			if last_valid is not None:
-				cleaned[index]=last_valid
+
+				cleaned[
+					index
+				]=last_valid
 
 		else:
 
@@ -860,16 +1017,26 @@ def _fill_missing_behaviors(events):
 		-1,
 	):
 
-		if cleaned[index] is None:
+		if cleaned[
+			index
+		] is None:
 
 			if next_valid is not None:
-				cleaned[index]=next_valid
+
+				cleaned[
+					index
+				]=next_valid
 
 		else:
 
-			next_valid=cleaned[index]
+			next_valid=cleaned[
+				index
+			]
 
-	return cleaned,missing_count
+	return (
+		cleaned,
+		missing_count,
+	)
 
 
 
@@ -877,9 +1044,6 @@ def _encode_behaviors(
 	labels,
 	behavior_names,
 ):
-	'''
-	Convert behavior labels into integer class indices.
-	'''
 
 	behavior_names=[
 		str(name)
@@ -888,15 +1052,16 @@ def _encode_behaviors(
 
 	lookup={
 		name:index
-		for index,name in enumerate(
+		for index,name
+		in enumerate(
 			behavior_names
 		)
 	}
 
-	# Case-insensitive backup mapping.
 	lookup_lower={
 		name.lower():index
-		for index,name in enumerate(
+		for index,name
+		in enumerate(
 			behavior_names
 		)
 	}
@@ -905,12 +1070,16 @@ def _encode_behaviors(
 
 	for label in labels:
 
-		label=str(label)
+		label=str(
+			label
+		)
 
 		if label in lookup:
 
 			encoded.append(
-				lookup[label]
+				lookup[
+					label
+				]
 			)
 
 		elif label.lower() in lookup_lower:
@@ -926,8 +1095,8 @@ def _encode_behaviors(
 			raise ValueError(
 				'Behavior "'
 				+label
-				+'" is present in the event sequence but not '
-				'in the behavior-name list.'
+				+'" is present in the event sequence '
+				'but not in the behavior-name list.'
 			)
 
 	return np.asarray(
@@ -936,9 +1105,9 @@ def _encode_behaviors(
 	)
 
 
-# ---------------------------------------------------------------------
-# Sliding-window features
-# ---------------------------------------------------------------------
+# ============================================================
+# Sliding-window representation
+# ============================================================
 
 
 def _window_compositions(
@@ -947,10 +1116,6 @@ def _window_compositions(
 	window_size,
 	window_step,
 ):
-	'''
-	Convert frame-level behavior labels into sliding-window
-	behavior-composition vectors.
-	'''
 
 	observations=np.asarray(
 		observations,
@@ -982,7 +1147,8 @@ def _window_compositions(
 	):
 
 		raise ValueError(
-			'Window size exceeds the number of analyzed frames.'
+			'Window size exceeds the number of '
+			'analyzed frames.'
 		)
 
 	features=[]
@@ -1008,11 +1174,15 @@ def _window_compositions(
 		counts=np.bincount(
 			window,
 			minlength=n_behaviors,
-		).astype(float)
+		).astype(
+			float
+		)
 
 		composition=(
 			counts
-			/float(window_size)
+			/float(
+				window_size
+			)
 		)
 
 		features.append(
@@ -1026,7 +1196,6 @@ def _window_compositions(
 			)
 		)
 
-		# End is exclusive internally.
 		bounds.append(
 			(
 				int(start),
@@ -1036,7 +1205,7 @@ def _window_compositions(
 
 		start+=window_step
 
-	# Make sure the end of the sequence is represented.
+	# Ensure the end of the video is represented.
 	last_start=(
 		len(observations)
 		-window_size
@@ -1048,7 +1217,9 @@ def _window_compositions(
 	):
 
 		start=last_start
-		end=len(observations)
+		end=len(
+			observations
+		)
 
 		window=observations[
 			start:end
@@ -1057,10 +1228,13 @@ def _window_compositions(
 		counts=np.bincount(
 			window,
 			minlength=n_behaviors,
-		).astype(float)
+		).astype(
+			float
+		)
 
 		features.append(
-			counts/float(
+			counts
+			/float(
 				window_size
 			)
 		)
@@ -1099,12 +1273,12 @@ def _map_window_states_to_frames(
 	n_frames,
 	n_motifs,
 ):
-	'''
-	Map overlapping sliding-window motif assignments back to frames.
 
-	Each frame receives the motif with the largest number of covering
-	windows. This is preferable to simply assigning the nearest window
-	center because overlap provides temporal smoothing.
+	'''
+	Map overlapping window states back to frame-level states.
+
+	Each frame receives the motif with the largest number
+	of overlapping-window votes.
 	'''
 
 	votes=np.zeros(
@@ -1138,7 +1312,9 @@ def _map_window_states_to_frames(
 		)==0
 	)[0]
 
-	if len(no_votes)>0:
+	if len(
+		no_votes
+	)>0:
 
 		covered=np.where(
 			votes.sum(
@@ -1146,7 +1322,9 @@ def _map_window_states_to_frames(
 			)>0
 		)[0]
 
-		if len(covered)==0:
+		if len(
+			covered
+		)==0:
 
 			raise ValueError(
 				'No frames received motif assignments.'
@@ -1162,7 +1340,9 @@ def _map_window_states_to_frames(
 				)
 			]
 
-			states[frame]=states[
+			states[
+				frame
+			]=states[
 				nearest
 			]
 
@@ -1178,9 +1358,6 @@ def _motif_composition(
 	n_motifs,
 	n_behaviors,
 ):
-	'''
-	Average behavior composition of all windows assigned to each motif.
-	'''
 
 	composition=np.zeros(
 		(
@@ -1203,18 +1380,22 @@ def _motif_composition(
 			window_states==motif
 		]
 
-		if len(selected)>0:
+		if len(
+			selected
+		)>0:
 
-			composition[motif]=np.mean(
+			composition[
+				motif
+			]=np.mean(
 				selected,
 				axis=0,
 			)
 
 		else:
 
-			composition[motif]=(
-				global_composition
-			)
+			composition[
+				motif
+			]=global_composition
 
 		row_sum=composition[
 			motif
@@ -1229,27 +1410,28 @@ def _motif_composition(
 	return composition
 
 
-# ---------------------------------------------------------------------
-# Motif summary statistics
-# ---------------------------------------------------------------------
+# ============================================================
+# Motif occurrence utilities
+# ============================================================
 
 
 def _contiguous_runs(states):
-	'''
-	Return contiguous runs as (state, start_frame, end_frame_exclusive).
-	'''
 
 	states=np.asarray(
 		states,
 		dtype=int,
 	)
 
-	if len(states)==0:
+	if len(
+		states
+	)==0:
+
 		return []
 
 	runs=[]
 
 	start=0
+
 	current=int(
 		states[0]
 	)
@@ -1260,7 +1442,9 @@ def _contiguous_runs(states):
 	):
 
 		state=int(
-			states[index]
+			states[
+				index
+			]
 		)
 
 		if state!=current:
@@ -1289,8 +1473,15 @@ def _contiguous_runs(states):
 
 
 def _collapse_repeats(sequence):
+
 	'''
-	Collapse repeated consecutive labels.
+	Example:
+
+	A A A B B C C A
+
+	becomes:
+
+	A B C A
 	'''
 
 	result=[]
@@ -1309,158 +1500,325 @@ def _collapse_repeats(sequence):
 	return result
 
 
+# ============================================================
+# User-defined sequence constraints
+# ============================================================
 
-def _dominant_sequence_for_motif(
-	labels,
-	runs,
-	motif_state,
-	max_length=3,
+
+def _validate_motif_sequence(
+	sequence,
+	min_sequence_length=2,
+	max_sequence_length=5,
+	sequence_rule='none',
 ):
+
 	'''
-	Estimate a representative ordered behavior sequence inside a motif.
+	Validate one collapsed motif occurrence.
 
-	For every occurrence, consecutive duplicate behavior labels are
-	collapsed. Common subsequences of length up to max_length are counted.
-	'''
+	sequence_rule:
 
-	counter=Counter()
+	none
+		No structural restriction.
 
-	for state,start,end in runs:
+	unique
+		Every behavior can occur only once.
 
-		if state!=motif_state:
-			continue
+		A -> B -> C     valid
+		A -> B -> A     invalid
 
-		collapsed=_collapse_repeats(
-			labels[
-				start:end
-			]
-		)
+	recurrence
+		At least one behavior must occur again.
 
-		if len(collapsed)==0:
-			continue
-
-		length=min(
-			max_length,
-			len(collapsed),
-		)
-
-		# Prefer longer behavioral sequences when available.
-		while length>=1:
-
-			if len(collapsed)>=length:
-
-				for index in range(
-					len(collapsed)
-					-length
-					+1
-				):
-
-					key=tuple(
-						collapsed[
-							index:index+length
-						]
-					)
-
-					counter[
-						(
-							length,
-							key,
-						)
-					]+=1
-
-			length-=1
-
-	if len(counter)==0:
-		return ''
-
-	maximum_length=max(
-		key[0]
-		for key in counter
-	)
-
-	candidates={
-		key:count
-		for key,count in counter.items()
-		if key[0]==maximum_length
-	}
-
-	best=max(
-		candidates,
-		key=candidates.get,
-	)
-
-	return ' -> '.join(
-		best[1]
-	)
-
-
-
-def _representative_intervals(
-	runs,
-	motif_state,
-	time_points,
-	limit=3,
-):
-	'''
-	Return representative longest motif occurrences.
+		A -> B -> C     invalid
+		A -> B -> A     valid
 	'''
 
-	candidates=[]
+	if sequence is None:
 
-	for state,start,end in runs:
+		return False
 
-		if state!=motif_state:
-			continue
+	sequence=[
+		behavior
+		for behavior in sequence
+		if behavior is not None
+	]
 
-		start_time=float(
-			time_points[
-				start
-			]
+	if len(
+		sequence
+	)<int(
+		min_sequence_length
+	):
+
+		return False
+
+	if (
+		max_sequence_length is not None
+		and len(sequence)
+		>int(
+			max_sequence_length
 		)
+	):
 
-		end_index=min(
-			end-1,
-			len(time_points)-1,
-		)
+		return False
 
-		end_time=float(
-			time_points[
-				end_index
-			]
-		)
+	if sequence_rule=='none':
 
-		duration=max(
-			0.0,
-			end_time-start_time,
-		)
+		return True
 
-		candidates.append(
-			(
-				duration,
-				start_time,
-				end_time,
+	if sequence_rule=='unique':
+
+		return (
+			len(sequence)
+			==len(
+				set(sequence)
 			)
 		)
 
-	candidates.sort(
-		key=lambda value:value[0],
-		reverse=True,
-	)
+	if sequence_rule=='recurrence':
 
-	intervals=[]
-
-	for _,start_time,end_time in candidates[
-		:limit
-	]:
-
-		intervals.append(
-			f'{start_time:.3f}-{end_time:.3f}s'
+		return (
+			len(sequence)
+			>len(
+				set(sequence)
+			)
 		)
 
-	return '; '.join(
-		intervals
+	raise ValueError(
+		'Unknown sequence rule: '
+		+str(
+			sequence_rule
+		)
 	)
 
+
+
+def _get_valid_motif_runs(
+	labels,
+	runs,
+	motif_state,
+	min_sequence_length=2,
+	max_sequence_length=5,
+	sequence_rule='none',
+):
+
+	valid_runs=[]
+
+	for state,start,end in runs:
+
+		if state!=motif_state:
+
+			continue
+
+		raw_sequence=labels[
+			start:end
+		]
+
+		collapsed_sequence=(
+			_collapse_repeats(
+				raw_sequence
+			)
+		)
+
+		is_valid=(
+			_validate_motif_sequence(
+				collapsed_sequence,
+				min_sequence_length=(
+					min_sequence_length
+				),
+				max_sequence_length=(
+					max_sequence_length
+				),
+				sequence_rule=(
+					sequence_rule
+				),
+			)
+		)
+
+		if not is_valid:
+
+			continue
+
+		valid_runs.append(
+			{
+				'start':int(
+					start
+				),
+				'end':int(
+					end
+				),
+				'sequence':
+					collapsed_sequence,
+			}
+		)
+
+	return valid_runs
+
+
+
+def _dominant_sequence_for_motif(
+	valid_runs,
+	max_length=5,
+):
+
+	if len(
+		valid_runs
+	)==0:
+
+		return ''
+
+	counter=Counter()
+
+	for run in valid_runs:
+
+		sequence=list(
+			run[
+				'sequence'
+			]
+		)
+
+		if len(
+			sequence
+		)==0:
+
+			continue
+
+		if max_length is not None:
+
+			sequence=sequence[
+				:int(
+					max_length
+				)
+			]
+
+		counter[
+			tuple(
+				sequence
+			)
+		]+=1
+
+	if len(
+		counter
+	)==0:
+
+		return ''
+
+	best_sequence=(
+		counter.most_common(
+			1
+		)[0][0]
+	)
+
+	return ' -> '.join(
+		best_sequence
+	)
+
+
+
+def _valid_occurrence_composition(
+	labels,
+	valid_runs,
+	behavior_names,
+	fallback_composition,
+):
+
+	'''
+	Calculate behavior composition using only valid
+	sequence-constrained motif occurrences.
+
+	If no valid occurrence exists, the original HMM
+	composition is retained as a fallback for model
+	consistency, although the motif is marked as having
+	zero valid occurrences.
+	'''
+
+	if len(
+		valid_runs
+	)==0:
+
+		return np.asarray(
+			fallback_composition,
+			dtype=float,
+		)
+
+	behavior_lookup={
+		str(name):index
+		for index,name
+		in enumerate(
+			behavior_names
+		)
+	}
+
+	behavior_lookup_lower={
+		str(name).lower():index
+		for index,name
+		in enumerate(
+			behavior_names
+		)
+	}
+
+	counts=np.zeros(
+		len(
+			behavior_names
+		),
+		dtype=float,
+	)
+
+	for run in valid_runs:
+
+		start=run[
+			'start'
+		]
+
+		end=run[
+			'end'
+		]
+
+		for behavior in labels[
+			start:end
+		]:
+
+			behavior=str(
+				behavior
+			)
+
+			if behavior in behavior_lookup:
+
+				index=behavior_lookup[
+					behavior
+				]
+
+			elif (
+				behavior.lower()
+				in behavior_lookup_lower
+			):
+
+				index=behavior_lookup_lower[
+					behavior.lower()
+				]
+
+			else:
+
+				continue
+
+			counts[
+				index
+			]+=1
+
+	total=counts.sum()
+
+	if total<=0:
+
+		return np.asarray(
+			fallback_composition,
+			dtype=float,
+		)
+
+	return counts/total
+
+
+# ============================================================
+# Motif statistics
+# ============================================================
 
 
 def _motif_statistics(
@@ -1471,9 +1829,19 @@ def _motif_statistics(
 	transition_matrix,
 	behavior_names,
 	top_n_behaviors,
+	min_sequence_length=2,
+	max_sequence_length=5,
+	sequence_rule='none',
 ):
+
 	'''
-	Generate motif-level summary statistics.
+	Generate motif-level statistics after applying sequence
+	constraints.
+
+	The HMM states are NOT modified.
+
+	Only individual motif occurrences are accepted/rejected
+	according to the user-defined sequence rules.
 	'''
 
 	states=np.asarray(
@@ -1486,13 +1854,17 @@ def _motif_statistics(
 		dtype=float,
 	)
 
-	n_motifs=composition.shape[0]
+	n_motifs=composition.shape[
+		0
+	]
 
 	runs=_contiguous_runs(
 		states
 	)
 
-	if len(time_points)>1:
+	if len(
+		time_points
+	)>1:
 
 		frame_duration=float(
 			np.median(
@@ -1517,35 +1889,76 @@ def _motif_statistics(
 
 	rows=[]
 
+	filtered_composition=np.zeros_like(
+		composition,
+		dtype=float,
+	)
+
 	for motif_state in range(
 		n_motifs
 	):
 
 		motif_id=(
-			motif_state+1
+			motif_state
+			+1
 		)
 
-		motif_runs=[
-			(
-				start,
-				end,
-			)
-			for state,start,end in runs
+		all_motif_runs=[
+			{
+				'start':int(
+					start
+				),
+				'end':int(
+					end
+				),
+			}
+			for state,start,end
+			in runs
 			if state==motif_state
 		]
 
-		occurrences=len(
-			motif_runs
+		total_occurrences=len(
+			all_motif_runs
 		)
 
-		frame_count=int(
-			np.sum(
-				states==motif_state
+		valid_runs=(
+			_get_valid_motif_runs(
+				labels,
+				runs,
+				motif_state,
+				min_sequence_length=(
+					min_sequence_length
+				),
+				max_sequence_length=(
+					max_sequence_length
+				),
+				sequence_rule=(
+					sequence_rule
+				),
 			)
 		)
 
+		valid_occurrences=len(
+			valid_runs
+		)
+
+		rejected_occurrences=(
+			total_occurrences
+			-valid_occurrences
+		)
+
+		valid_frame_count=sum(
+			run[
+				'end'
+			]
+			-run[
+				'start'
+			]
+			for run in valid_runs
+		)
+
 		occupancy=(
-			frame_count
+			valid_frame_count
 			/len(states)
 			if len(states)>0
 			else 0.0
@@ -1553,10 +1966,15 @@ def _motif_statistics(
 
 		durations=[
 			(
-				end-start
+				run[
+					'end'
+				]
+				-run[
+					'start'
+				]
 			)
 			*frame_duration
-			for start,end in motif_runs
+			for run in valid_runs
 		]
 
 		mean_duration=(
@@ -1565,21 +1983,41 @@ def _motif_statistics(
 					durations
 				)
 			)
-			if len(durations)>0
+			if len(
+				durations
+			)>0
 			else 0.0
 		)
 
-		probabilities=composition[
+		valid_composition=(
+			_valid_occurrence_composition(
+				labels,
+				valid_runs,
+				behavior_names,
+				composition[
+					motif_state
+				],
+			)
+		)
+
+		filtered_composition[
 			motif_state
-		]
+		]=valid_composition
+
+		probabilities=(
+			valid_composition
+		)
 
 		order=np.argsort(
 			probabilities
 		)[::-1]
 
 		top_n=min(
-			int(
-				top_n_behaviors
+			max(
+				1,
+				int(
+					top_n_behaviors
+				),
 			),
 			len(
 				behavior_names
@@ -1588,52 +2026,85 @@ def _motif_statistics(
 
 		representative=[]
 
-		for behavior_index in order[
-			:top_n
-		]:
+		if valid_occurrences>0:
 
-			representative.append(
-				str(
-					behavior_names[
+			for behavior_index in order[
+				:top_n
+			]:
+
+				probability=float(
+					probabilities[
 						behavior_index
 					]
 				)
-				+' ('
-				+format(
-					float(
-						probabilities[
+
+				if probability<=0:
+
+					continue
+
+				representative.append(
+					str(
+						behavior_names[
 							behavior_index
 						]
-					),
-					'.3f',
+					)
+					+' ('
+					+format(
+						probability,
+						'.3f',
+					)
+					+')'
 				)
-				+')'
-			)
 
-		representative_behaviors='; '.join(
-			representative
+		representative_behaviors=(
+			'; '.join(
+				representative
+			)
 		)
 
 		dominant_sequence=(
 			_dominant_sequence_for_motif(
-				labels,
-				runs,
-				motif_state,
-				max_length=3,
+				valid_runs,
+				max_length=(
+					max_sequence_length
+				),
 			)
 		)
 
-		preceding=[]
+		# ----------------------------------------------------
+		# Neighboring motifs for valid occurrences
+		# ----------------------------------------------------
 
+		preceding=[]
 		following=[]
+
+		valid_boundaries={
+			(
+				run[
+					'start'
+				],
+				run[
+					'end'
+				],
+			)
+			for run in valid_runs
+		}
 
 		for index,run in enumerate(
 			runs
 		):
 
-			state,_,_=run
+			state,start,end=run
 
 			if state!=motif_state:
+
+				continue
+
+			if (
+				start,
+				end,
+			) not in valid_boundaries:
+
 				continue
 
 			if index>0:
@@ -1645,7 +2116,9 @@ def _motif_statistics(
 					+1
 				)
 
-			if index<len(runs)-1:
+			if index<len(
+				runs
+			)-1:
 
 				following.append(
 					runs[
@@ -1656,7 +2129,9 @@ def _motif_statistics(
 
 		common_preceding=''
 
-		if len(preceding)>0:
+		if len(
+			preceding
+		)>0:
 
 			common_preceding=int(
 				Counter(
@@ -1668,7 +2143,9 @@ def _motif_statistics(
 
 		common_following=''
 
-		if len(following)>0:
+		if len(
+			following
+		)>0:
 
 			common_following=int(
 				Counter(
@@ -1678,22 +2155,90 @@ def _motif_statistics(
 				)[0][0]
 			)
 
+		# ----------------------------------------------------
+		# Representative intervals
+		# ----------------------------------------------------
+
+		interval_candidates=[]
+
+		for run in valid_runs:
+
+			start=run[
+				'start'
+			]
+
+			end=run[
+				'end'
+			]
+
+			start_time=float(
+				time_points[
+					start
+				]
+			)
+
+			end_index=min(
+				end-1,
+				len(
+					time_points
+				)-1,
+			)
+
+			end_time=float(
+				time_points[
+					end_index
+				]
+			)
+
+			duration=max(
+				0.0,
+				end_time
+				-start_time,
+			)
+
+			interval_candidates.append(
+				(
+					duration,
+					start_time,
+					end_time,
+				)
+			)
+
+		interval_candidates.sort(
+			key=lambda value:
+				value[0],
+			reverse=True,
+		)
+
 		representative_intervals=(
-			_representative_intervals(
-				runs,
-				motif_state,
-				time_points,
-				limit=3,
+			'; '.join(
+				[
+					f'{start_time:.3f}-{end_time:.3f}s'
+					for (
+						_,
+						start_time,
+						end_time,
+					)
+					in interval_candidates[
+						:3
+					]
+				]
 			)
 		)
 
-		# Excluding self-transition makes the most likely destination
-		# easier to interpret.
-		transition_row=transition_matrix[
-			motif_state
-		].copy()
+		# ----------------------------------------------------
+		# HMM transition information
+		# ----------------------------------------------------
 
-		if len(transition_row)>1:
+		transition_row=(
+			transition_matrix[
+				motif_state
+			].copy()
+		)
+
+		if len(
+			transition_row
+		)>1:
 
 			transition_row[
 				motif_state
@@ -1712,31 +2257,110 @@ def _motif_statistics(
 
 			most_likely_next=''
 
+		validity_rate=(
+			valid_occurrences
+			/total_occurrences
+			if total_occurrences>0
+			else 0.0
+		)
+
 		rows.append(
 			{
-				'motif_id':motif_id,
-				'motif_name':'Motif '+str(motif_id),
-				'dominant_behavior_sequence':dominant_sequence,
-				'representative_behaviors':representative_behaviors,
-				'occupancy':float(occupancy),
-				'mean_duration':float(mean_duration),
-				'occurrences':int(occurrences),
-				'frame_count':int(frame_count),
-				'common_preceding_motif':common_preceding,
-				'common_following_motif':common_following,
-				'most_likely_next_motif':most_likely_next,
-				'representative_intervals':representative_intervals,
+				'motif_id':
+					motif_id,
+
+				'motif_name':
+					'Motif '
+					+str(
+						motif_id
+					),
+
+				'dominant_behavior_sequence':
+					dominant_sequence,
+
+				'representative_behaviors':
+					representative_behaviors,
+
+				'occupancy':
+					float(
+						occupancy
+					),
+
+				'mean_duration':
+					float(
+						mean_duration
+					),
+
+				'occurrences':
+					int(
+						valid_occurrences
+					),
+
+				'total_hmm_occurrences':
+					int(
+						total_occurrences
+					),
+
+				'rejected_occurrences':
+					int(
+						rejected_occurrences
+					),
+
+				'validity_rate':
+					float(
+						validity_rate
+					),
+
+				'frame_count':
+					int(
+						valid_frame_count
+					),
+
+				'common_preceding_motif':
+					common_preceding,
+
+				'common_following_motif':
+					common_following,
+
+				'most_likely_next_motif':
+					most_likely_next,
+
+				'representative_intervals':
+					representative_intervals,
+
+				'sequence_rule':
+					str(
+						sequence_rule
+					),
+
+				'min_sequence_length':
+					int(
+						min_sequence_length
+					),
+
+				'max_sequence_length':
+					(
+						int(
+							max_sequence_length
+						)
+						if max_sequence_length
+						is not None
+						else ''
+					),
 			}
 		)
 
-	return pd.DataFrame(
-		rows
+	return (
+		pd.DataFrame(
+			rows
+		),
+		filtered_composition,
 	)
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Plotting
-# ---------------------------------------------------------------------
+# ============================================================
 
 
 def _plot_timeline(
@@ -1746,9 +2370,6 @@ def _plot_timeline(
 	animal_id,
 	motif_names=None,
 ):
-	'''
-	Plot inferred motif state across the analyzed time sequence.
-	'''
 
 	time_points=np.asarray(
 		time_points,
@@ -1771,7 +2392,10 @@ def _plot_timeline(
 	)
 
 	figure,axis=plt.subplots(
-		figsize=(14,3.5)
+		figsize=(
+			14,
+			3.5,
+		)
 	)
 
 	axis.scatter(
@@ -1791,10 +2415,12 @@ def _plot_timeline(
 	if motif_names is None:
 
 		labels=[
-			'Motif '+str(
+			'Motif '
+			+str(
 				motif_id
 			)
-			for motif_id in unique_ids
+			for motif_id
+			in unique_ids
 		]
 
 	else:
@@ -1802,11 +2428,13 @@ def _plot_timeline(
 		labels=[
 			motif_names.get(
 				motif_id,
-				'Motif '+str(
+				'Motif '
+				+str(
 					motif_id
 				),
 			)
-			for motif_id in unique_ids
+			for motif_id
+			in unique_ids
 		]
 
 	axis.set_yticklabels(
@@ -1823,7 +2451,9 @@ def _plot_timeline(
 
 	axis.set_title(
 		'Behavioral Motif Timeline - ID '
-		+str(animal_id)
+		+str(
+			animal_id
+		)
 	)
 
 	axis.grid(
@@ -1852,9 +2482,6 @@ def _plot_composition(
 	animal_id,
 	motif_names=None,
 ):
-	'''
-	Plot motif x behavior composition heatmap.
-	'''
 
 	composition=np.asarray(
 		composition,
@@ -1916,10 +2543,12 @@ def _plot_composition(
 	if motif_names is None:
 
 		y_labels=[
-			'Motif '+str(
+			'Motif '
+			+str(
 				motif_id
 			)
-			for motif_id in range(
+			for motif_id
+			in range(
 				1,
 				n_motifs+1,
 			)
@@ -1930,11 +2559,13 @@ def _plot_composition(
 		y_labels=[
 			motif_names.get(
 				motif_id,
-				'Motif '+str(
+				'Motif '
+				+str(
 					motif_id
 				),
 			)
-			for motif_id in range(
+			for motif_id
+			in range(
 				1,
 				n_motifs+1,
 			)
@@ -1954,7 +2585,9 @@ def _plot_composition(
 
 	axis.set_title(
 		'Motif Composition - ID '
-		+str(animal_id)
+		+str(
+			animal_id
+		)
 	)
 
 	colorbar=figure.colorbar(
@@ -1979,9 +2612,9 @@ def _plot_composition(
 	)
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Main motif discovery
-# ---------------------------------------------------------------------
+# ============================================================
 
 
 def discover_behavioral_motifs(
@@ -1996,61 +2629,22 @@ def discover_behavioral_motifs(
 	top_n_behaviors=3,
 	window_size=30,
 	window_step=5,
+	min_sequence_length=2,
+	max_sequence_length=5,
+	sequence_rule='none',
 ):
+
 	'''
-	Discover recurring behavioral motifs.
+	Discover behavioral motifs independently for each animal.
 
-	Each animal is analyzed independently.
-
-	Workflow
-	--------
-	1. Prepare ordered frame-level behavior sequence.
-	2. Build sliding-window behavior compositions.
-	3. Fit Gaussian HMM.
-	4. Decode one latent motif for every window.
-	5. Map motif states back to every frame.
-	6. Calculate motif statistics.
-	7. Export summary tables and visualizations.
+	Sequence constraints are applied AFTER HMM fitting.
 
 	Parameters
 	----------
-	event_probability : dict, list, tuple, or numpy.ndarray
-		LabGym frame-level behavior sequence(s).
-
-	time_points : sequence
-		Frame timestamps.
-
-	behavior_names : sequence
-		Stable ordered list of behavior classes.
-
-	output_folder : str
-		Output directory.
-
-	n_motifs : int
-		Requested number of latent behavioral motifs.
-
-	random_seed : int
-		Random seed for reproducibility.
-
-	max_iter : int
-		Maximum number of Baum-Welch iterations.
-
-	tol : float
-		Convergence tolerance.
-
-	top_n_behaviors : int
-		Number of representative behaviors reported for each motif.
-
-	window_size : int
-		Number of frames in each temporal behavior-composition window.
-
-	window_step : int
-		Number of frames between consecutive windows.
-
-	Returns
-	-------
-	dict
-		Dictionary indexed by animal ID.
+	sequence_rule : str
+		'none'
+		'unique'
+		'recurrence'
 	'''
 
 	event_sequences=(
@@ -2064,7 +2658,9 @@ def discover_behavioral_motifs(
 		dtype=float,
 	)
 
-	if len(time_points)<2:
+	if len(
+		time_points
+	)<2:
 
 		raise ValueError(
 			'At least two analyzed frames are required.'
@@ -2075,7 +2671,9 @@ def discover_behavioral_motifs(
 		for name in behavior_names
 	]
 
-	if len(behavior_names)<2:
+	if len(
+		behavior_names
+	)<2:
 
 		raise ValueError(
 			'At least two behavior classes are required.'
@@ -2105,6 +2703,16 @@ def discover_behavioral_motifs(
 		window_step
 	)
 
+	min_sequence_length=int(
+		min_sequence_length
+	)
+
+	if max_sequence_length is not None:
+
+		max_sequence_length=int(
+			max_sequence_length
+		)
+
 	if n_motifs<2:
 
 		raise ValueError(
@@ -2123,10 +2731,41 @@ def discover_behavioral_motifs(
 			'Window step must be at least 1 frame.'
 		)
 
-	if window_size>len(time_points):
+	if window_size>len(
+		time_points
+	):
 
 		raise ValueError(
-			'Window size cannot exceed the number of analyzed frames.'
+			'Window size cannot exceed the number '
+			'of analyzed frames.'
+		)
+
+	if min_sequence_length<1:
+
+		raise ValueError(
+			'Minimum sequence length must be at least 1.'
+		)
+
+	if (
+		max_sequence_length is not None
+		and max_sequence_length
+		<min_sequence_length
+	):
+
+		raise ValueError(
+			'Maximum sequence length must be greater '
+			'than or equal to minimum sequence length.'
+		)
+
+	if sequence_rule not in {
+		'none',
+		'unique',
+		'recurrence',
+	}:
+
+		raise ValueError(
+			'Sequence rule must be one of: '
+			'none, unique, recurrence.'
 		)
 
 	output_folder=Path(
@@ -2146,17 +2785,29 @@ def discover_behavioral_motifs(
 			events
 		)
 
-		if len(events)!=len(
+		if len(
+			events
+		)!=len(
 			time_points
 		):
 
 			raise ValueError(
 				'ID '
-				+str(animal_id)
+				+str(
+					animal_id
+				)
 				+': behavior sequence length ('
-				+str(len(events))
+				+str(
+					len(
+						events
+					)
+				)
 				+') does not match time-point length ('
-				+str(len(time_points))
+				+str(
+					len(
+						time_points
+					)
+				)
 				+').'
 			)
 
@@ -2186,15 +2837,25 @@ def discover_behavioral_motifs(
 			window_step,
 		)
 
-		if len(window_features)<n_motifs:
+		if len(
+			window_features
+		)<n_motifs:
 
 			raise ValueError(
 				'ID '
-				+str(animal_id)
+				+str(
+					animal_id
+				)
 				+': requested '
-				+str(n_motifs)
+				+str(
+					n_motifs
+				)
 				+' motifs, but only '
-				+str(len(window_features))
+				+str(
+					len(
+						window_features
+					)
+				)
 				+' sliding windows were generated.'
 			)
 
@@ -2227,7 +2888,7 @@ def discover_behavioral_motifs(
 			)
 		)
 
-		composition=(
+		original_composition=(
 			_motif_composition(
 				window_features,
 				window_states,
@@ -2238,48 +2899,70 @@ def discover_behavioral_motifs(
 			)
 		)
 
-		summary=(
-			_motif_statistics(
-				frame_states,
-				labels,
-				time_points,
-				composition,
-				model.transmat_,
-				behavior_names,
-				max(
-					1,
-					top_n_behaviors,
-				),
-			)
+		(
+			summary,
+			filtered_composition,
+		)=_motif_statistics(
+			frame_states,
+			labels,
+			time_points,
+			original_composition,
+			model.transmat_,
+			behavior_names,
+			max(
+				1,
+				top_n_behaviors,
+			),
+			min_sequence_length=(
+				min_sequence_length
+			),
+			max_sequence_length=(
+				max_sequence_length
+			),
+			sequence_rule=(
+				sequence_rule
+			),
 		)
 
 		prefix=(
 			'behavioral_motifs_ID'
-			+str(animal_id)
+			+str(
+				animal_id
+			)
 		)
 
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 		# Frame assignments
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 
 		frame_table=pd.DataFrame(
 			{
-				'frame':np.arange(
-					len(
-						frame_states
+				'frame':
+					np.arange(
+						len(
+							frame_states
+						),
+						dtype=int,
 					),
-					dtype=int,
-				),
-				'time_seconds':time_points,
-				'observed_behavior':labels,
-				'motif_id':frame_states+1,
-				'motif_name':[
-					'Motif '
-					+str(
-						state+1
-					)
-					for state in frame_states
-				],
+
+				'time_seconds':
+					time_points,
+
+				'observed_behavior':
+					labels,
+
+				'motif_id':
+					frame_states+1,
+
+				'motif_name':
+					[
+						'Motif '
+						+str(
+							state+1
+						)
+						for state
+						in frame_states
+					],
 			}
 		)
 
@@ -2292,9 +2975,9 @@ def discover_behavioral_motifs(
 			index=False,
 		)
 
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 		# Window assignments
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 
 		window_table=pd.DataFrame(
 			window_features,
@@ -2306,7 +2989,8 @@ def discover_behavioral_motifs(
 			'window_end_frame',
 			[
 				end-1
-				for _,end in window_bounds
+				for _,end
+				in window_bounds
 			],
 		)
 
@@ -2315,7 +2999,8 @@ def discover_behavioral_motifs(
 			'window_start_frame',
 			[
 				start
-				for start,_ in window_bounds
+				for start,_
+				in window_bounds
 			],
 		)
 
@@ -2327,7 +3012,9 @@ def discover_behavioral_motifs(
 
 		window_table[
 			'motif_id'
-		]=window_states+1
+		]=(
+			window_states+1
+		)
 
 		window_table[
 			'motif_name'
@@ -2336,7 +3023,8 @@ def discover_behavioral_motifs(
 			+str(
 				state+1
 			)
-			for state in window_states
+			for state
+			in window_states
 		]
 
 		window_table.to_csv(
@@ -2348,9 +3036,9 @@ def discover_behavioral_motifs(
 			index=False,
 		)
 
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 		# Summary
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 
 		summary.to_csv(
 			output_folder
@@ -2361,12 +3049,12 @@ def discover_behavioral_motifs(
 			index=False,
 		)
 
-		# -----------------------------------------------------
-		# Composition / emission table
-		# -----------------------------------------------------
+		# ----------------------------------------------------
+		# Filtered motif composition
+		# ----------------------------------------------------
 
 		emission_table=pd.DataFrame(
-			composition,
+			filtered_composition,
 			columns=behavior_names,
 		)
 
@@ -2378,7 +3066,8 @@ def discover_behavioral_motifs(
 				+str(
 					motif_id
 				)
-				for motif_id in range(
+				for motif_id
+				in range(
 					1,
 					n_motifs+1,
 				)
@@ -2404,16 +3093,45 @@ def discover_behavioral_motifs(
 			index=False,
 		)
 
-		# -----------------------------------------------------
+		# ----------------------------------------------------
+		# Original HMM composition
+		# ----------------------------------------------------
+
+		original_table=pd.DataFrame(
+			original_composition,
+			columns=behavior_names,
+		)
+
+		original_table.insert(
+			0,
+			'motif_id',
+			np.arange(
+				1,
+				n_motifs+1,
+				dtype=int,
+			),
+		)
+
+		original_table.to_csv(
+			output_folder
+			/(
+				prefix
+				+'_original_composition.csv'
+			),
+			index=False,
+		)
+
+		# ----------------------------------------------------
 		# Transition probabilities
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 
 		transition_labels=[
 			'Motif '
 			+str(
 				motif_id
 			)
-			for motif_id in range(
+			for motif_id
+			in range(
 				1,
 				n_motifs+1,
 			)
@@ -2434,9 +3152,9 @@ def discover_behavioral_motifs(
 			index=True,
 		)
 
-		# -----------------------------------------------------
-		# Visualizations
-		# -----------------------------------------------------
+		# ----------------------------------------------------
+		# Plots
+		# ----------------------------------------------------
 
 		_plot_timeline(
 			time_points,
@@ -2450,7 +3168,7 @@ def discover_behavioral_motifs(
 		)
 
 		_plot_composition(
-			composition,
+			filtered_composition,
 			behavior_names,
 			output_folder
 			/(
@@ -2460,9 +3178,9 @@ def discover_behavioral_motifs(
 			animal_id,
 		)
 
-		# -----------------------------------------------------
-		# Model data
-		# -----------------------------------------------------
+		# ----------------------------------------------------
+		# Model
+		# ----------------------------------------------------
 
 		np.savez_compressed(
 			output_folder
@@ -2470,28 +3188,53 @@ def discover_behavioral_motifs(
 				prefix
 				+'_model.npz'
 			),
-			start_probability=model.startprob_,
-			transition_probability=model.transmat_,
-			window_means=model.means_,
-			window_covariances=model.covars_,
-			window_features=window_features,
-			window_centers=window_centers,
-			decoded_window_motif=window_states+1,
-			decoded_frame_motif=frame_states+1,
-			behavior_composition=composition,
-			behavior_names=np.asarray(
-				behavior_names,
-				dtype=str,
-			),
-			log_likelihood=np.asarray(
-				model.log_likelihood_history_,
-				dtype=float,
-			),
+
+			start_probability=
+				model.startprob_,
+
+			transition_probability=
+				model.transmat_,
+
+			window_means=
+				model.means_,
+
+			window_covariances=
+				model.covars_,
+
+			window_features=
+				window_features,
+
+			window_centers=
+				window_centers,
+
+			decoded_window_motif=
+				window_states+1,
+
+			decoded_frame_motif=
+				frame_states+1,
+
+			original_behavior_composition=
+				original_composition,
+
+			filtered_behavior_composition=
+				filtered_composition,
+
+			behavior_names=
+				np.asarray(
+					behavior_names,
+					dtype=str,
+				),
+
+			log_likelihood=
+				np.asarray(
+					model.log_likelihood_history_,
+					dtype=float,
+				),
 		)
 
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 		# Metadata
-		# -----------------------------------------------------
+		# ----------------------------------------------------
 
 		try:
 
@@ -2509,41 +3252,88 @@ def discover_behavioral_motifs(
 			)
 
 		metadata={
-			'animal_id':metadata_animal_id,
-			'model_type':'window_composition_gaussian_hmm',
-			'n_motifs':n_motifs,
-			'window_size_frames':window_size,
-			'window_step_frames':window_step,
-			'random_seed':random_seed,
-			'maximum_iterations':max_iter,
-			'iterations':len(
-				model.log_likelihood_history_
-			),
-			'final_log_likelihood':(
-				float(
-					model.log_likelihood_history_[
-						-1
-					]
-				)
-				if len(
+			'animal_id':
+				metadata_animal_id,
+
+			'model_type':
+				'window_composition_gaussian_hmm',
+
+			'n_motifs':
+				n_motifs,
+
+			'window_size_frames':
+				window_size,
+
+			'window_step_frames':
+				window_step,
+
+			'random_seed':
+				random_seed,
+
+			'maximum_iterations':
+				max_iter,
+
+			'iterations':
+				len(
 					model.log_likelihood_history_
-				)>0
-				else None
-			),
-			'n_frames':int(
-				len(
-					frame_states
-				)
-			),
-			'n_windows':int(
-				len(
-					window_features
-				)
-			),
-			'missing_frames_imputed':int(
-				missing_count
-			),
-			'behavior_names':behavior_names,
+				),
+
+			'final_log_likelihood':
+				(
+					float(
+						model.log_likelihood_history_[
+							-1
+						]
+					)
+					if len(
+						model.log_likelihood_history_
+					)>0
+					else None
+				),
+
+			'n_frames':
+				int(
+					len(
+						frame_states
+					)
+				),
+
+			'n_windows':
+				int(
+					len(
+						window_features
+					)
+				),
+
+			'missing_frames_imputed':
+				int(
+					missing_count
+				),
+
+			'behavior_names':
+				behavior_names,
+
+			'sequence_constraints':{
+				'min_sequence_length':
+					int(
+						min_sequence_length
+					),
+
+				'max_sequence_length':
+					(
+						int(
+							max_sequence_length
+						)
+						if max_sequence_length
+						is not None
+						else None
+					),
+
+				'sequence_rule':
+					str(
+						sequence_rule
+					),
+			},
 		}
 
 		with open(
@@ -2566,23 +3356,43 @@ def discover_behavioral_motifs(
 		all_results[
 			animal_id
 		]={
-			'model':model,
-			'states':frame_states,
-			'window_states':window_states,
-			'window_features':window_features,
-			'window_centers':window_centers,
-			'window_bounds':window_bounds,
-			'composition':composition,
-			'summary':summary,
-			'metadata':metadata,
+			'model':
+				model,
+
+			'states':
+				frame_states,
+
+			'window_states':
+				window_states,
+
+			'window_features':
+				window_features,
+
+			'window_centers':
+				window_centers,
+
+			'window_bounds':
+				window_bounds,
+
+			'original_composition':
+				original_composition,
+
+			'composition':
+				filtered_composition,
+
+			'summary':
+				summary,
+
+			'metadata':
+				metadata,
 		}
 
 	return all_results
 
 
-# ---------------------------------------------------------------------
-# User-defined motif names
-# ---------------------------------------------------------------------
+# ============================================================
+# Apply user-defined motif names
+# ============================================================
 
 
 def apply_motif_names(
@@ -2590,19 +3400,18 @@ def apply_motif_names(
 	animal_id,
 	motif_names,
 ):
+
 	'''
-	Apply user-defined names to previously inferred behavioral motifs.
+	Apply user-defined interpretation names to motif outputs.
 
-	The naming operation changes interpretation labels only. It does not
-	refit or otherwise alter the Hidden Markov Model.
+	This function does NOT alter or refit the HMM.
 
-	motif_names example:
-
+	Example
+	-------
 	{
 		1: 'Exploration',
 		2: 'Feeding',
 		3: 'Grooming',
-		4: 'Resting',
 	}
 	'''
 
@@ -2612,7 +3421,9 @@ def apply_motif_names(
 
 	prefix=(
 		'behavioral_motifs_ID'
-		+str(animal_id)
+		+str(
+			animal_id
+		)
 	)
 
 	clean_names={}
@@ -2627,11 +3438,15 @@ def apply_motif_names(
 			motif_name
 		).strip()
 
-		if len(motif_name)==0:
+		if len(
+			motif_name
+		)==0:
 
 			raise ValueError(
 				'Motif '
-				+str(motif_id)
+				+str(
+					motif_id
+				)
 				+' must have a name.'
 			)
 
@@ -2642,7 +3457,8 @@ def apply_motif_names(
 	if len(
 		set(
 			name.lower()
-			for name in clean_names.values()
+			for name
+			in clean_names.values()
 		)
 	)!=len(
 		clean_names
@@ -2652,9 +3468,9 @@ def apply_motif_names(
 			'Every motif must have a unique name.'
 		)
 
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 	# Summary
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 
 	summary_path=(
 		output_folder
@@ -2689,7 +3505,9 @@ def apply_motif_names(
 		summary[
 			'motif_id'
 		]
-		.astype(int)
+		.astype(
+			int
+		)
 		.map(
 			clean_names
 		)
@@ -2706,7 +3524,9 @@ def apply_motif_names(
 				].isna(),
 				'motif_id',
 			]
-			.astype(int)
+			.astype(
+				int
+			)
 			.tolist()
 		)
 
@@ -2720,62 +3540,69 @@ def apply_motif_names(
 			)
 		)
 
-	if 'common_preceding_motif' in summary.columns:
+	def _map_optional_motif_name(value):
 
-		def preceding_name(value):
+		if pd.isna(
+			value
+		):
 
-			if pd.isna(value):
-				return ''
+			return ''
 
-			try:
+		try:
 
-				return clean_names.get(
-					int(value),
-					'',
-				)
+			return clean_names.get(
+				int(
+					float(
+						value
+					)
+				),
+				'',
+			)
 
-			except (
-				TypeError,
-				ValueError,
-			):
+		except (
+			TypeError,
+			ValueError,
+		):
 
-				return ''
+			return ''
+
+	if (
+		'common_preceding_motif'
+		in summary.columns
+	):
 
 		summary[
 			'common_preceding_motif_name'
 		]=summary[
 			'common_preceding_motif'
 		].apply(
-			preceding_name
+			_map_optional_motif_name
 		)
 
-	if 'common_following_motif' in summary.columns:
-
-		def following_name(value):
-
-			if pd.isna(value):
-				return ''
-
-			try:
-
-				return clean_names.get(
-					int(value),
-					'',
-				)
-
-			except (
-				TypeError,
-				ValueError,
-			):
-
-				return ''
+	if (
+		'common_following_motif'
+		in summary.columns
+	):
 
 		summary[
 			'common_following_motif_name'
 		]=summary[
 			'common_following_motif'
 		].apply(
-			following_name
+			_map_optional_motif_name
+		)
+
+	if (
+		'most_likely_next_motif'
+		in summary.columns
+	):
+
+		summary[
+			'most_likely_next_motif_name'
+		]=summary[
+			'most_likely_next_motif'
+		].apply(
+			_map_optional_motif_name
 		)
 
 	summary.to_csv(
@@ -2783,9 +3610,9 @@ def apply_motif_names(
 		index=False,
 	)
 
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 	# Frame assignments
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 
 	frame_path=(
 		output_folder
@@ -2801,7 +3628,10 @@ def apply_motif_names(
 			frame_path
 		)
 
-		if 'motif_id' in frame_table.columns:
+		if (
+			'motif_id'
+			in frame_table.columns
+		):
 
 			frame_table[
 				'motif_name'
@@ -2809,7 +3639,9 @@ def apply_motif_names(
 				frame_table[
 					'motif_id'
 				]
-				.astype(int)
+				.astype(
+					int
+				)
 				.map(
 					clean_names
 				)
@@ -2820,9 +3652,9 @@ def apply_motif_names(
 				index=False,
 			)
 
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 	# Window assignments
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 
 	window_path=(
 		output_folder
@@ -2838,7 +3670,10 @@ def apply_motif_names(
 			window_path
 		)
 
-		if 'motif_id' in window_table.columns:
+		if (
+			'motif_id'
+			in window_table.columns
+		):
 
 			window_table[
 				'motif_name'
@@ -2846,7 +3681,9 @@ def apply_motif_names(
 				window_table[
 					'motif_id'
 				]
-				.astype(int)
+				.astype(
+					int
+				)
 				.map(
 					clean_names
 				)
@@ -2857,12 +3694,9 @@ def apply_motif_names(
 				index=False,
 			)
 
-	# ---------------------------------------------------------
-	# Emission/composition table
-	#
-	# Written to be idempotent. Running motif naming repeatedly will
-	# update columns instead of trying to insert duplicate columns.
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
+	# Composition / emission table
+	# --------------------------------------------------------
 
 	emission_path=(
 		output_folder
@@ -2880,7 +3714,8 @@ def apply_motif_names(
 
 		unnamed_columns=[
 			column
-			for column in emission.columns
+			for column
+			in emission.columns
 			if str(
 				column
 			).startswith(
@@ -2897,27 +3732,29 @@ def apply_motif_names(
 				inplace=True,
 			)
 
-		expected_ids=np.arange(
+		if 'motif_id' not in emission.columns:
+
+			emission.insert(
+				0,
+				'motif_id',
+				np.arange(
+					1,
+					len(
+						emission
+					)+1,
+					dtype=int,
+				),
+			)
+
+		emission[
+			'motif_id'
+		]=np.arange(
 			1,
 			len(
 				emission
 			)+1,
 			dtype=int,
 		)
-
-		if 'motif_id' in emission.columns:
-
-			emission[
-				'motif_id'
-			]=expected_ids
-
-		else:
-
-			emission.insert(
-				0,
-				'motif_id',
-				expected_ids,
-			)
 
 		updated_names=[
 			clean_names.get(
@@ -2929,10 +3766,16 @@ def apply_motif_names(
 					motif_id
 				),
 			)
-			for motif_id in expected_ids
+			for motif_id
+			in emission[
+				'motif_id'
+			]
 		]
 
-		if 'motif_name' in emission.columns:
+		if (
+			'motif_name'
+			in emission.columns
+		):
 
 			emission[
 				'motif_name'
@@ -2948,7 +3791,8 @@ def apply_motif_names(
 
 		other_columns=[
 			column
-			for column in emission.columns
+			for column
+			in emission.columns
 			if column not in {
 				'motif_id',
 				'motif_name',
@@ -2968,9 +3812,9 @@ def apply_motif_names(
 			index=False,
 		)
 
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 	# Transition matrix
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 
 	transition_path=(
 		output_folder
@@ -2987,15 +3831,14 @@ def apply_motif_names(
 			index_col=0,
 		)
 
-		if transition.shape[0]!=transition.shape[1]:
+		if (
+			transition.shape[0]
+			!=transition.shape[1]
+		):
 
 			raise ValueError(
-				'Motif transition probability table must be square; '
-				'found shape '
-				+str(
-					transition.shape
-				)
-				+'.'
+				'Motif transition probability table '
+				'must be square.'
 			)
 
 		ordered_names=[
@@ -3006,7 +3849,8 @@ def apply_motif_names(
 					motif_id
 				),
 			)
-			for motif_id in range(
+			for motif_id
+			in range(
 				1,
 				len(
 					transition
@@ -3014,17 +3858,22 @@ def apply_motif_names(
 			)
 		]
 
-		transition.index=ordered_names
-		transition.columns=ordered_names
+		transition.index=(
+			ordered_names
+		)
+
+		transition.columns=(
+			ordered_names
+		)
 
 		transition.to_csv(
 			transition_path,
 			index=True,
 		)
 
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 	# Metadata
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
 
 	metadata_path=(
 		output_folder
@@ -3055,8 +3904,11 @@ def apply_motif_names(
 	]={
 		str(
 			motif_id
-		):motif_name
-		for motif_id,motif_name in clean_names.items()
+		):
+			motif_name
+
+		for motif_id,motif_name
+		in clean_names.items()
 	}
 
 	with open(
@@ -3072,9 +3924,9 @@ def apply_motif_names(
 			ensure_ascii=False,
 		)
 
-	# ---------------------------------------------------------
-	# Regenerate timeline
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
+	# Regenerate timeline with names
+	# --------------------------------------------------------
 
 	if frame_path.exists():
 
@@ -3089,7 +3941,10 @@ def apply_motif_names(
 			frame_table.columns
 		):
 
-			if 'time_seconds' in frame_table.columns:
+			if (
+				'time_seconds'
+				in frame_table.columns
+			):
 
 				time_values=(
 					frame_table[
@@ -3113,7 +3968,9 @@ def apply_motif_names(
 				frame_table[
 					'motif_id'
 				]
-				.astype(int)
+				.astype(
+					int
+				)
 				.to_numpy()
 				-1
 			)
@@ -3127,12 +3984,14 @@ def apply_motif_names(
 					+'_timeline.png'
 				),
 				animal_id,
-				motif_names=clean_names,
+				motif_names=(
+					clean_names
+				),
 			)
 
-	# ---------------------------------------------------------
-	# Regenerate composition heatmap
-	# ---------------------------------------------------------
+	# --------------------------------------------------------
+	# Regenerate composition heatmap with names
+	# --------------------------------------------------------
 
 	if emission_path.exists():
 
@@ -3142,7 +4001,8 @@ def apply_motif_names(
 
 		behavior_columns=[
 			column
-			for column in emission.columns
+			for column
+			in emission.columns
 			if column not in {
 				'motif_id',
 				'motif_name',
@@ -3171,157 +4031,9 @@ def apply_motif_names(
 					+'_composition_heatmap.png'
 				),
 				animal_id,
-				motif_names=clean_names,
+				motif_names=(
+					clean_names
+				),
 			)
 
 	return clean_names
-
-def _fill_missing_behaviors(events):
-	'''
-	Convert LabGym event entries into a clean behavior-label sequence.
-
-	LabGym parse_all_events_file() returns entries such as:
-
-		['sniffing sv', 0.92]
-		['NA', -1]
-
-	This function extracts the behavior name, treats NA as missing,
-	then forward/backward fills missing frames.
-
-	Returns
-	-------
-	cleaned : list[str]
-		Clean frame-level behavior labels.
-
-	missing_count : int
-		Number of frames that originally contained NA/missing behavior.
-	'''
-
-	events=list(events)
-
-	cleaned=[]
-
-	for event in events:
-
-		# -----------------------------------------------------
-		# LabGym standard format:
-		# [behavior_name, probability]
-		# -----------------------------------------------------
-
-		if isinstance(
-			event,
-			(
-				list,
-				tuple,
-				np.ndarray,
-			),
-		):
-
-			if len(event)==0:
-
-				cleaned.append(None)
-				continue
-
-			behavior=event[0]
-
-		else:
-
-			# Also support direct string labels.
-			behavior=event
-
-		# -----------------------------------------------------
-		# Missing values
-		# -----------------------------------------------------
-
-		if behavior is None:
-
-			cleaned.append(None)
-			continue
-
-		if isinstance(
-			behavior,
-			(
-				float,
-				np.floating,
-			),
-		):
-
-			if np.isnan(behavior):
-
-				cleaned.append(None)
-				continue
-
-		behavior=str(
-			behavior
-		).strip()
-
-		if behavior.lower() in {
-			'',
-			'na',
-			'nan',
-			'none',
-			'null',
-		}:
-
-			cleaned.append(None)
-
-		else:
-
-			cleaned.append(
-				behavior
-			)
-
-	missing_count=sum(
-		value is None
-		for value in cleaned
-	)
-
-	if missing_count==len(cleaned):
-
-		raise ValueError(
-			'The behavior sequence contains no valid behavior labels.'
-		)
-
-	# ---------------------------------------------------------
-	# Forward-fill missing frames
-	# ---------------------------------------------------------
-
-	last_valid=None
-
-	for index,value in enumerate(
-		cleaned
-	):
-
-		if value is None:
-
-			if last_valid is not None:
-
-				cleaned[index]=last_valid
-
-		else:
-
-			last_valid=value
-
-	# ---------------------------------------------------------
-	# Backward-fill missing frames at beginning
-	# ---------------------------------------------------------
-
-	next_valid=None
-
-	for index in range(
-		len(cleaned)-1,
-		-1,
-		-1,
-	):
-
-		if cleaned[index] is None:
-
-			if next_valid is not None:
-
-				cleaned[index]=next_valid
-
-		else:
-
-			next_valid=cleaned[index]
-
-	return cleaned,missing_count
