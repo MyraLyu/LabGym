@@ -329,11 +329,9 @@ def build_transition_dataset(
 def _fps(folder, time_index, explicit=None):
     """Resolve FPS from explicit input, analysis log, or frame clock.
 
-    LabGym may write centisecond-rounded timestamps beginning
-    at a nonzero integer frame offset.
-
-    The fallback checks candidate integer FPS values and
-    integer start-frame offsets.
+    The time/ID fallback reproduces LabGym's writer: round each
+    frame time to centiseconds, round the analysis start to
+    centiseconds, subtract, and round that difference.
 
     Ambiguous candidates are rejected.
     """
@@ -401,47 +399,60 @@ def _fps(folder, time_index, explicit=None):
                     "supply explicit fps or a usable Analysis log.txt"
                 )
 
-            frames = np.arange(
-                len(times), dtype=float
-            )
-
+            # Writer frame numbers are 1-based. Past this cap,
+            # a clock that would have matched fails closed.
+            frame_cap = 3000
+            count = len(times)
+            first_stamp = float(times[0])
             matching = []
 
-            # Check integer FPS candidates and integer
-            # start-frame offsets.
-            #
-            # Example at 30 FPS:
-            # start_frame = 1:
-            # 0.03, 0.07, 0.10, 0.13, 0.17, ...
-            #
-            # start_frame = 0:
-            # 0.00, 0.03, 0.07, 0.10, 0.13, ...
-
             for candidate in range(2, 101):
-                approximate_start = (
-                    times[0] * candidate
-                )
-
-                lower = max(
-                    0,
-                    int(np.floor(approximate_start)) - 2
-                )
-
-                upper = (
-                    int(np.ceil(approximate_start)) + 2
-                )
-
-                for start_frame in range(
-                    lower, upper + 1
-                ):
-                    expected = np.round(
-                        (frames + start_frame) / candidate,
-                        2,
+                for first_frame in range(1, frame_cap + 1):
+                    frame_time = round(
+                        first_frame / candidate, 2
+                    )
+                    start_t = round(
+                        frame_time - first_stamp, 2
                     )
 
-                    if np.all(
-                        np.abs(times - expected) < 1e-8
+                    if (
+                        start_t < 0
+                        or start_t > frame_time
                     ):
+                        continue
+
+                    if first_frame > 1:
+                        previous = round(
+                            (first_frame - 1) / candidate,
+                            2,
+                        )
+                        if not previous < start_t:
+                            continue
+
+                    if abs(
+                        round(frame_time - start_t, 2)
+                        - first_stamp
+                    ) >= 1e-8:
+                        continue
+
+                    matched = True
+
+                    for i in range(count):
+                        expected = round(
+                            round(
+                                (first_frame + i) / candidate,
+                                2,
+                            )
+                            - start_t,
+                            2,
+                        )
+                        if abs(
+                            expected - float(times[i])
+                        ) >= 1e-8:
+                            matched = False
+                            break
+
+                    if matched:
                         matching.append(candidate)
                         break
 

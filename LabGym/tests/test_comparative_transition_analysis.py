@@ -87,6 +87,25 @@ def clock(fps, n, start_frame=0):
     )
 
 
+def labgym_time_index(fps, n, t=0, length=15):
+    """Timestamps from LabGym's centisecond time/ID writer."""
+    start_t = round((t - length / fps), 2)
+    if start_t < 0:
+        start_t = 0.00
+
+    first_frame = 1
+    while round(first_frame / fps, 2) < start_t:
+        first_frame += 1
+
+    return [
+        round(
+            round((first_frame + i) / fps, 2) - start_t,
+            2,
+        )
+        for i in range(n)
+    ]
+
+
 def make_pair(
     tmp_path,
     first,
@@ -578,7 +597,26 @@ def test_default_30fps_clock(tmp_path):
 
 
 def test_default_30fps_seven_timestamps(tmp_path):
+    """Single-round 0.00, 0.03, ... matches more than one fps."""
     times = clock(30, 7)
+
+    with pytest.raises(
+        ValueError, match="Ambiguous time/ID fps"
+    ):
+        _fps(tmp_path, times)
+
+
+@pytest.mark.parametrize(
+    "t, length",
+    [
+        (0, 15),
+        (0.53, 15),
+    ],
+)
+def test_offset_start_30fps(tmp_path, t, length):
+    times = labgym_time_index(
+        30, 120, t=t, length=length
+    )
 
     fps, source = _fps(tmp_path, times)
 
@@ -586,13 +624,24 @@ def test_default_30fps_seven_timestamps(tmp_path):
     assert source == "time/ID (centisecond-rounded)"
 
 
-@pytest.mark.parametrize(
-    "start_frame",
-    [1, 2, 5, 15, 30],
-)
-def test_offset_start_30fps(tmp_path, start_frame):
-    times = clock(
-        30, 120, start_frame=start_frame
+def test_nonzero_analysis_start_30fps(tmp_path):
+    times = labgym_time_index(
+        30, 120, t=0.53, length=15
+    )
+
+    assert times[:5] == [0.00, 0.04, 0.07, 0.10, 0.14]
+
+    fps, source = _fps(tmp_path, times)
+
+    assert fps == 30
+    assert source == "time/ID (centisecond-rounded)"
+
+
+def test_nonzero_analysis_start_30fps_seven_timestamps(
+    tmp_path,
+):
+    times = labgym_time_index(
+        30, 7, t=0.53, length=15
     )
 
     fps, source = _fps(tmp_path, times)
@@ -633,7 +682,7 @@ def test_rounded_clock_end_to_end(tmp_path):
         "a",
         "all_event_probability.xlsx",
         {"0": ["A"] * 120},
-        clock(30, 120, start_frame=1),
+        labgym_time_index(30, 120, t=0, length=15),
     )
 
     b = write_result_workbook(
@@ -641,7 +690,7 @@ def test_rounded_clock_end_to_end(tmp_path):
         "b",
         "all_event_probability.xlsx",
         {"0": ["B"] * 120},
-        clock(30, 120, start_frame=5),
+        labgym_time_index(30, 120, t=0.53, length=15),
     )
 
     t, s, bouts = build_per_animal_measurements(
