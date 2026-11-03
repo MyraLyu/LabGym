@@ -23,6 +23,10 @@ from LabGym.comparative_transition_analysis import (
     build_group_summaries,
     select_transitions,
     plot_comparison_matrices,
+    set_difference_direction,
+    transition_confirmation_list,
+    selected_per_animal_values,
+    export_signed_differences,
 )
 
 
@@ -385,7 +389,7 @@ def test_signed_difference_positive(c3_data):
 
     assert row[
         "difference_transition_probability"
-    ] == pytest.approx(0.5)
+    ] == pytest.approx(-0.5)
 
 
 def test_undefined_difference_remains_nan(comparison):
@@ -432,8 +436,8 @@ def test_matrix_difference_matches_summary(comparison):
     diff = comparison["difference_matrix"]
 
     expected = (
-        treated.loc["A", "B"]
-        - control.loc["A", "B"]
+        control.loc["A", "B"]
+        - treated.loc["A", "B"]
     )
 
     assert diff.loc["A", "B"] == pytest.approx(expected)
@@ -635,3 +639,57 @@ def test_plot_comparison_matrices(comparison, tmp_path):
     assert len(fig.axes) >= 3
 
     plt.close(fig)
+
+
+def test_direction_default_and_reversible(c3_data):
+    t, b = c3_data
+    t = t.copy()
+    mask = (t.group == "treated") & (t.source_behavior == "A") & (t.target_behavior == "B")
+    t.loc[mask, "transition_probability"] = 1.0
+    result = build_group_summaries(t, b, group_order=("control", "treated"))
+    assert result["difference_matrix"].loc["A", "B"] == pytest.approx(-0.5)
+    reverse = set_difference_direction(result, "B-A")
+    assert reverse["difference_matrix"].loc["A", "B"] == pytest.approx(0.5)
+    assert result["difference_matrix"].loc["A", "B"] == pytest.approx(-0.5)
+    pd.testing.assert_frame_equal(result["transition_summary"], reverse["transition_summary"])
+    assert reverse["difference_direction_label"] == "treated - control"
+
+def test_direction_export_and_plot(c3_data, tmp_path):
+    t, b = c3_data
+    result = build_group_summaries(t, b, output_folder=tmp_path)
+    assert "control - treated" in pd.read_csv(tmp_path / "group_signed_differences.csv")["difference_direction"].unique()
+    assert "control - treated" in pd.read_csv(tmp_path / "signed_difference_matrix.csv").columns[0]
+    reverse = set_difference_direction(result, "B-A")
+    export_signed_differences(reverse, tmp_path)
+    assert "treated - control" in pd.read_csv(tmp_path / "signed_difference_matrix.csv").columns[0]
+    import matplotlib.pyplot as plt
+    fig = plot_comparison_matrices(reverse)
+    assert "treated - control" in fig.axes[2].get_title()
+    assert "treated - control" in fig.axes[-1].get_ylabel()
+    plt.close(fig)
+
+def test_confirmation_and_animal_trace(comparison):
+    pairs = [("A", "B"), ("B", "C")]
+    confirmation = transition_confirmation_list(comparison, pairs)
+    assert confirmation["transition"].tolist() == ["A → B", "B → C"]
+    summary, differences, animals = select_transitions(comparison, pairs, include_animals=True)
+    assert len(summary) == 4 and len(differences) == 2
+    assert len(animals) == 10
+    assert set(["group", "source_recording", "species", "animal_id", "transition_probability"]).issubset(animals.columns)
+    ab = selected_per_animal_values(comparison, [("A", "B")])
+    assert len(ab) == 5
+    assert ab["source_recording"].notna().all()
+    assert np.isnan(ab.loc[(ab.group == "control") & (ab.source_recording == "video2"), "transition_probability"].iloc[0])
+
+def test_equal_weighting_unequal_denominators(c3_data):
+    t, b = c3_data
+    t = t.copy()
+    for animal, outgoing, ab_count in [("0", 1, 1), ("1", 9, 0)]:
+        mask = (t.group == "control") & (t.source_recording == "video1") & (t.animal_id == animal) & (t.source_behavior == "A")
+        t.loc[mask, "outgoing_count"] = outgoing
+        t.loc[mask & (t.target_behavior == "B"), "transition_count"] = ab_count
+        t.loc[mask & (t.target_behavior == "C"), "transition_count"] = outgoing - ab_count
+    result = build_group_summaries(t, b, group_order=("control", "treated"))
+    edge = get_edge(result["transition_summary"], "control", "A", "B")
+    assert edge["mean_transition_probability"] == pytest.approx(0.5)
+    assert edge["mean_transition_probability"] != pytest.approx(0.1)

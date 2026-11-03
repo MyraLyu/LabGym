@@ -1,5 +1,3 @@
-
-
 """LabGym Comparative Transition Analysis — Checkpoints 1, 2, and 3.
 
 C1: Per-recording, per-animal transition counts and identity.
@@ -958,6 +956,7 @@ def build_group_summaries(
     group_order=None,
     behavior_order=None,
     output_folder=None,
+    difference_direction="A-B",
 ):
     """Build descriptive group summaries without pooling animals.
 
@@ -968,10 +967,12 @@ def build_group_summaries(
         Excluded from the mean, retained as NaN.
 
     Signed difference:
-        Second group minus first group.
+        First group minus second group (default).
 
     Every summary retains n_animals and contributor counts.
     """
+    if difference_direction not in ("A-B", "B-A"):
+        raise ValueError("difference_direction must be A-B or B-A")
     alphabet, groups = _c3_validate(
         transition_df,
         behavior_df,
@@ -1089,13 +1090,14 @@ def build_group_summaries(
         1, "second_group", groups[1]
     )
 
+    direction_label = (f"{groups[0]} - {groups[1]}" if difference_direction == "A-B"
+                       else f"{groups[1]} - {groups[0]}")
+    difference["difference_direction"] = direction_label
     for metric in edge_metrics:
         col = f"mean_{metric}"
-
-        difference[f"difference_{metric}"] = (
-            difference[f"{col}_second"]
-            - difference[f"{col}_first"]
-        )
+        first = difference[f"{col}_first"]
+        second = difference[f"{col}_second"]
+        difference[f"difference_{metric}"] = (first - second if difference_direction == "A-B" else second - first)
 
     matrices = {}
 
@@ -1124,6 +1126,10 @@ def build_group_summaries(
 
     result = {
         "groups": groups,
+        "difference_direction": difference_direction,
+        "difference_direction_label": direction_label,
+        "per_animal_transitions": transition_df.copy(),
+        "per_animal_behaviors": behavior_df.copy(),
         "behaviors": alphabet,
         "transition_summary": edge_summary,
         "behavior_summary": behavior_summary,
@@ -1160,18 +1166,68 @@ def build_group_summaries(
                 / f"group_{i}_probability_matrix.csv"
             )
 
-        difference_matrix.to_csv(
+        difference_matrix.rename_axis(index=f"source_behavior ({direction_label})").to_csv(
             destination / "signed_difference_matrix.csv"
         )
 
     return result
 
 
+def set_difference_direction(comparison, direction="A-B"):
+    """Return a new comparison with reversed display sign, preserving group summaries."""
+    if direction not in ("A-B", "B-A"):
+        raise ValueError("direction must be A-B or B-A")
+    result = comparison.copy()
+    old = comparison.get("difference_direction", "A-B")
+    groups = comparison["groups"]
+    label = f"{groups[0]} - {groups[1]}" if direction == "A-B" else f"{groups[1]} - {groups[0]}"
+    result["difference_direction"] = direction
+    result["difference_direction_label"] = label
+    result["signed_differences"] = comparison["signed_differences"].copy()
+    result["signed_differences"]["difference_direction"] = label
+    result["difference_matrix"] = comparison["difference_matrix"].copy()
+    if old != direction:
+        columns = [c for c in result["signed_differences"] if c.startswith("difference_") and c != "difference_direction"]
+        result["signed_differences"][columns] *= -1
+        result["difference_matrix"] *= -1
+    return result
+
+def transition_confirmation_list(comparison, selected_pairs):
+    """Ordered, user-readable confirmation rows for selected matrix cells."""
+    allowed = set(zip(comparison["signed_differences"]["source_behavior"],
+                      comparison["signed_differences"]["target_behavior"]))
+    pairs = list(dict.fromkeys(tuple(pair) for pair in selected_pairs))
+    if not set(pairs).issubset(allowed):
+        raise ValueError("Unknown or disabled transitions")
+    return pd.DataFrame([{"source_behavior": a, "target_behavior": b,
+                          "transition": f"{a} → {b}"} for a, b in pairs],
+                        columns=["source_behavior", "target_behavior", "transition"])
+
+def selected_per_animal_values(comparison, selected_pairs):
+    """Trace each selected measurement to its original animal and recording."""
+    confirmation = transition_confirmation_list(comparison, selected_pairs)
+    source = comparison.get("per_animal_transitions")
+    if source is None:
+        raise ValueError("Missing per-animal transitions")
+    keys = set(zip(confirmation["source_behavior"], confirmation["target_behavior"]))
+    mask = [(a,b) in keys for a,b in zip(source["source_behavior"], source["target_behavior"])]
+    return source.loc[mask].copy().reset_index(drop=True)
+
+def export_signed_differences(comparison, output_folder):
+    """Export direction-labeled signed differences and matrix."""
+    folder = Path(output_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    label = comparison["difference_direction_label"]
+    comparison["signed_differences"].to_csv(folder / "group_signed_differences.csv", index=False)
+    comparison["difference_matrix"].rename_axis(index=f"source_behavior ({label})").to_csv(
+        folder / "signed_difference_matrix.csv")
+
+
 # ============================================================
 # CHECKPOINT 3 — TRANSITION SELECTION
 # ============================================================
 
-def select_transitions(comparison, selected_pairs):
+def select_transitions(comparison, selected_pairs, include_animals=False):
     """Return group summaries for selected directed transitions."""
     diff = comparison["signed_differences"]
     summary = comparison["transition_summary"]
@@ -1207,10 +1263,11 @@ def select_transitions(comparison, selected_pairs):
         )
     ]
 
-    return (
-        summary.loc[mask_s].copy(),
-        diff.loc[mask_d].copy(),
-    )
+    selected_summary = summary.loc[mask_s].copy()
+    selected_diff = diff.loc[mask_d].copy()
+    if include_animals:
+        return selected_summary, selected_diff, selected_per_animal_values(comparison, selected_pairs)
+    return selected_summary, selected_diff
 
 
 # ============================================================
@@ -1260,7 +1317,7 @@ def plot_comparison_matrices(
     titles = [
         str(groups[0]),
         str(groups[1]),
-        f"{groups[1]} − {groups[0]}",
+        comparison.get("difference_direction_label", f"{groups[0]} - {groups[1]}"),
     ]
 
     selected = (
@@ -1320,11 +1377,13 @@ def plot_comparison_matrices(
                             )
                         )
 
-        fig.colorbar(
+        colorbar = fig.colorbar(
             image,
             ax=ax,
             shrink=0.7,
         )
+        if i == 2:
+            colorbar.set_label(titles[2])
 
     if output_path is not None:
         output_path = Path(output_path)
@@ -1379,7 +1438,7 @@ def launch_transition_selector(comparison):
         )
     )
 
-    fig.subplots_adjust(bottom=0.16)
+    fig.subplots_adjust(bottom=0.29)
 
     ax.set_xlim(
         -0.5,
@@ -1432,6 +1491,8 @@ def launch_transition_selector(comparison):
             ax.add_patch(patch)
             patches[pair] = patch
 
+    confirmation = fig.text(0.04, 0.13, "Selected transitions: none", fontsize=9, va="top")
+
     def click(event):
         if (
             event.inaxes is not ax
@@ -1468,6 +1529,8 @@ def launch_transition_selector(comparison):
             else "white"
         )
 
+        names = transition_confirmation_list(comparison, sorted(selected))["transition"].tolist()
+        confirmation.set_text("Selected transitions: " + (", ".join(names) if names else "none"))
         fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect(
@@ -1508,6 +1571,7 @@ def build_comparative_analysis(
     behavior_order=None,
     collapse_repeats=True,
     include_self=False,
+    difference_direction="A-B",
 ):
     """Run all three checkpoints in one pipeline.
 
@@ -1522,7 +1586,7 @@ def build_comparative_analysis(
 
     group_order : tuple, optional
         Defines the subtraction order:
-        second group minus first group.
+        first group minus second group by default.
 
     behavior_order : list, optional
         Common ordering for all group matrices.
@@ -1554,6 +1618,7 @@ def build_comparative_analysis(
         group_order=group_order,
         behavior_order=behavior_order,
         output_folder=output_folder,
+        difference_direction=difference_direction,
     )
 
     comparison["per_animal_transitions"] = transitions
