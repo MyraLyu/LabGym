@@ -1,11 +1,11 @@
-"""LabGym Comparative Transition Analysis — Checkpoints 1, 2, and 3.
+"""LabGym Comparative Transition Analysis — Checkpoints 1, 2, 3, and 4.
 
 C1: Per-recording, per-animal transition counts and identity.
 C2: Per-animal bout durations, switching rates, and FPS inference.
 C3: Shared behavior alignment, equal-weighted group summaries,
     aligned matrices, signed differences, and transition selection.
 
-No inferential statistics are performed.
+C4: Dedicated two-group per-animal permutation inference for confirmed selections.
 """
 
 import ast
@@ -1625,4 +1625,252 @@ def build_comparative_analysis(
     comparison["per_animal_behaviors"] = behaviors
     comparison["per_animal_bouts"] = bouts
 
+    return comparison
+
+
+# ============================================================
+# CHECKPOINT 4 — CONFIRMED TWO-GROUP PERMUTATION STATISTICS
+# ============================================================
+# This path is independent of Mine Results statistics.
+# Dependencies: scipy, statsmodels (direct project dependencies).
+
+import math
+from itertools import combinations
+from scipy import stats as _c4_scipy_stats
+from statsmodels.stats.multitest import multipletests as _c4_multipletests
+
+_C4_TRANSITION_METRICS = {
+    "transition_count", "transition_probability", "switching_rate_per_1000_frames",
+}
+_C4_BEHAVIOR_METRICS = {
+    "bout_count", "total_bout_frames", "mean_bout_frames",
+    "median_bout_frames", "mean_bout_duration_seconds",
+    "median_bout_duration_seconds", "switching_rate_per_1000_frames",
+}
+_C4_ALLOWED_METRICS = _C4_TRANSITION_METRICS | _C4_BEHAVIOR_METRICS
+_C4_ID = IDENTITY
+
+
+def _c4_selection(selection):
+    """Normalize one user-confirmed measurement specification.
+
+    Accepted forms:
+      {"kind": "transition", "source_behavior": "A", "target_behavior": "B",
+       "metric": "transition_probability"}
+      {"kind": "behavior", "behavior": "A", "metric": "mean_bout_duration_seconds"}
+      ("A", "B")  # shorthand for a transition probability
+
+    A selection is never inferred from all available rows.
+    """
+    if isinstance(selection, (tuple, list)) and len(selection) == 2:
+        selection = {"kind": "transition", "source_behavior": selection[0],
+                     "target_behavior": selection[1], "metric": "transition_probability"}
+    if not isinstance(selection, dict):
+        raise ValueError("Each confirmed selection must be a dict or a directed pair")
+    item = dict(selection)
+    kind = item.get("kind", "transition")
+    metric = item.get("metric", "transition_probability" if kind == "transition" else None)
+    if kind not in ("transition", "behavior"):
+        raise ValueError("Selection kind must be 'transition' or 'behavior'")
+    allowed = _C4_TRANSITION_METRICS if kind == "transition" else _C4_BEHAVIOR_METRICS
+    if metric not in allowed:
+        raise ValueError(f"Unsupported {kind} metric: {metric!r}")
+    if kind == "transition":
+        if not item.get("source_behavior") or not item.get("target_behavior"):
+            raise ValueError("Transition selection needs source_behavior and target_behavior")
+        label = f"{item['source_behavior']} → {item['target_behavior']} | {metric}"
+    else:
+        if not item.get("behavior"):
+            raise ValueError("Behavior selection needs behavior")
+        label = f"{item['behavior']} | {metric}"
+    return {"kind": kind, "metric": metric,
+            "source_behavior": item.get("source_behavior") if kind == "transition" else None,
+            "target_behavior": item.get("target_behavior") if kind == "transition" else None,
+            "behavior": item.get("behavior") if kind == "behavior" else None,
+            "selection_label": label}
+
+
+def _c4_cliffs_delta(a, b):
+    """Cliff's delta: positive means Group A tends to exceed Group B."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if not len(a) or not len(b):
+        return np.nan
+    return float((np.count_nonzero(a[:, None] > b[None, :]) -
+                  np.count_nonzero(a[:, None] < b[None, :])) / (len(a) * len(b)))
+
+
+def _c4_permutation(a, b, seed=0, exact_limit=100000, random_assignments=99999):
+    """Two-sided independent-label permutation test of mean(A)-mean(B).
+
+    Exact: enumerate all C(nA+nB,nA) distinct label assignments.
+    Randomized: 99,999 independent assignments plus the observed one;
+    p = (1 + number of random statistics as extreme) / 100,000.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    n_a, n_b = len(a), len(b)
+    n = n_a + n_b
+    n_assignments = math.comb(n, n_a)
+    pooled = np.concatenate([a, b])
+    observed = float(a.mean() - b.mean())
+    total = float(pooled.sum())
+    tolerance = 1e-12 * max(1.0, abs(observed))
+    if n_assignments <= exact_limit:
+        extreme = 0
+        for indexes in combinations(range(n), n_a):
+            mean_a = sum(pooled[i] for i in indexes) / n_a
+            stat = mean_a - (total - n_a * mean_a) / n_b
+            extreme += abs(stat) >= abs(observed) - tolerance
+        return float(extreme / n_assignments), "exact", n_assignments, None
+    rng = np.random.default_rng(seed)
+    extreme = 0
+    # Vectorized batches limit memory use for large numbers of animals.
+    remaining = random_assignments
+    while remaining:
+        batch = min(1024, remaining)
+        # Each row is an independent uniformly sampled label assignment.
+        ranks = rng.random((batch, n))
+        idx = np.argpartition(ranks, n_a - 1, axis=1)[:, :n_a]
+        sums_a = pooled[idx].sum(axis=1)
+        simulated = sums_a / n_a - (total - sums_a) / n_b
+        extreme += int(np.count_nonzero(np.abs(simulated) >= abs(observed) - tolerance))
+        remaining -= batch
+    return float((extreme + 1) / (random_assignments + 1)), "randomized", random_assignments + 1, int(seed)
+
+
+def _c4_values_for_selection(comparison, spec):
+    """Return per-animal source rows, preserving recording identity and FPS."""
+    if spec["kind"] == "transition":
+        frame = comparison["per_animal_transitions"]
+        subset = frame.loc[
+            frame["source_behavior"].eq(spec["source_behavior"]) &
+            frame["target_behavior"].eq(spec["target_behavior"])
+        ].copy()
+    else:
+        frame = comparison["per_animal_behaviors"]
+        subset = frame.loc[frame["behavior"].eq(spec["behavior"])].copy()
+    if subset.empty:
+        raise ValueError(f"Confirmed measurement does not exist: {spec['selection_label']}")
+    if spec["metric"] not in subset.columns:
+        raise ValueError(f"Missing measurement column: {spec['metric']}")
+    if subset.duplicated(_C4_ID).any():
+        raise ValueError(f"Duplicate animal-level observations: {spec['selection_label']}")
+    subset["measurement_value"] = pd.to_numeric(subset[spec["metric"]], errors="coerce")
+    subset["excluded_from_test"] = ~np.isfinite(subset["measurement_value"].to_numpy(dtype=float))
+    subset["exclusion_reason"] = np.where(subset["excluded_from_test"], "undefined_or_nonfinite", "")
+    subset["selection_label"] = spec["selection_label"]
+    subset["measurement_metric"] = spec["metric"]
+    subset["measurement_kind"] = spec["kind"]
+    return subset
+
+
+def build_two_group_statistics(
+    comparison, confirmed_selections, output_folder=None, seed=0,
+    alpha=0.05, min_animals=5, fps_tolerance=0.01,
+):
+    """C4: test only confirmed measurements using independent animals.
+
+    Group A/B follow comparison['groups'], independent of C3 display sign.
+    Undefined probabilities are excluded; observed zeroes remain valid.
+    Switching rates are blocked only if contributing animals have
+    incompatible FPS. Holm is applied to all testable selections in this run.
+    All selections (including non-testable) are returned and exported.
+
+    Returns dict with 'results' and 'per_animal_values' DataFrames.
+    """
+    if not 0 < alpha < 1 or min_animals < 1 or fps_tolerance < 0:
+        raise ValueError("Invalid alpha, min_animals, or fps_tolerance")
+    if not isinstance(seed, (int, np.integer)) or seed < 0:
+        raise ValueError("seed must be a nonnegative integer")
+    groups = list(comparison["groups"])
+    if len(groups) != 2 or groups[0] == groups[1]:
+        raise ValueError("Exactly two distinct groups are required")
+    selections = [_c4_selection(x) for x in confirmed_selections]
+    labels = [x["selection_label"] for x in selections]
+    if len(labels) != len(set(labels)):
+        raise ValueError("Duplicate confirmed selections")
+    rows, animal_rows = [], []
+    for spec in selections:
+        subset = _c4_values_for_selection(comparison, spec)
+        if not set(subset["group"]).issubset(set(groups)):
+            raise ValueError("Unexpected group in per-animal observations")
+        subset["group_role"] = subset["group"].map({groups[0]: "A", groups[1]: "B"})
+        animal_rows.append(subset)
+        values = []
+        n_total, n_excluded, n_valid = [], [], []
+        for group in groups:
+            group_frame = subset.loc[subset["group"].eq(group)]
+            valid = group_frame.loc[~group_frame["excluded_from_test"]]
+            values.append(valid["measurement_value"].to_numpy(dtype=float))
+            n_total.append(len(group_frame))
+            n_valid.append(len(valid))
+            n_excluded.append(len(group_frame) - len(valid))
+        a, b = values
+        warnings = []
+        reason = ""
+        if min(n_valid) < min_animals:
+            reason = f"insufficient_animals: at least {min_animals} contributing animals per group required"
+        if spec["metric"] == "switching_rate_per_1000_frames":
+            valid_fps = subset.loc[~subset["excluded_from_test"], "fps"] if "fps" in subset else pd.Series(dtype=float)
+            fps = pd.to_numeric(valid_fps, errors="coerce").to_numpy(dtype=float)
+            if len(fps) != sum(n_valid) or not np.isfinite(fps).all() or (len(fps) and np.ptp(fps) > fps_tolerance):
+                reason = (reason + "; " if reason else "") + "incompatible_fps_for_switching_rate"
+        if spec["metric"] in {"transition_count", "bout_count", "total_bout_frames"}:
+            warnings.append("raw_counts_not_exposure_normalized")
+        if sum(n_excluded):
+            warnings.append("undefined_or_nonfinite_values_excluded")
+        row = {**spec, "group_a": groups[0], "group_b": groups[1],
+               "difference_direction": f"{groups[0]} - {groups[1]}",
+               "n_total_a": n_total[0], "n_total_b": n_total[1],
+               "n_contributing_a": n_valid[0], "n_contributing_b": n_valid[1],
+               "n_excluded_a": n_excluded[0], "n_excluded_b": n_excluded[1],
+               "mean_a": float(a.mean()) if len(a) else np.nan,
+               "mean_b": float(b.mean()) if len(b) else np.nan,
+               "mean_difference_a_minus_b": float(a.mean() - b.mean()) if len(a) and len(b) else np.nan,
+               "cliffs_delta_a_vs_b": _c4_cliffs_delta(a, b),
+               "testable": not bool(reason), "non_testable_reason": reason,
+               "p_raw": np.nan, "p_holm": np.nan, "significant_holm": False,
+               "alpha": alpha, "test_type": "not_testable", "permutation_count": 0,
+               "seed": np.nan, "warnings": "; ".join(warnings)}
+        if not reason:
+            p, method, count, used_seed = _c4_permutation(a, b, seed=int(seed))
+            row.update(p_raw=p, test_type=method, permutation_count=count,
+                       seed=used_seed if used_seed is not None else np.nan)
+        rows.append(row)
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        eligible = result["testable"].astype(bool)
+        if eligible.any():
+            rejected, corrected, _, _ = _c4_multipletests(
+                result.loc[eligible, "p_raw"].to_numpy(dtype=float),
+                alpha=alpha, method="holm")
+            result.loc[eligible, "p_holm"] = corrected
+            result.loc[eligible, "significant_holm"] = rejected
+    animals = pd.concat(animal_rows, ignore_index=True) if animal_rows else pd.DataFrame()
+    output = {"results": result, "per_animal_values": animals,
+              "groups": groups, "alpha": alpha, "random_seed": int(seed)}
+    if output_folder is not None:
+        folder = Path(output_folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        result.to_csv(folder / "two_group_permutation_statistics.csv", index=False)
+        animals.to_csv(folder / "two_group_selected_per_animal_values.csv", index=False)
+    return output
+
+
+def build_comparative_analysis_with_statistics(
+    recordings, confirmed_selections, output_folder=None, seed=0,
+    group_order=None, behavior_order=None, collapse_repeats=True,
+    include_self=False, difference_direction="A-B", alpha=0.05,
+    min_animals=5, fps_tolerance=0.01,
+):
+    """Run C1+C2+C3+C4, without changing the original C1-C3 API."""
+    comparison = build_comparative_analysis(
+        recordings, output_folder=output_folder, group_order=group_order,
+        behavior_order=behavior_order, collapse_repeats=collapse_repeats,
+        include_self=include_self, difference_direction=difference_direction)
+    comparison["two_group_statistics"] = build_two_group_statistics(
+        comparison, confirmed_selections, output_folder=output_folder,
+        seed=seed, alpha=alpha, min_animals=min_animals,
+        fps_tolerance=fps_tolerance)
     return comparison

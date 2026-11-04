@@ -706,3 +706,132 @@ def test_rounded_clock_end_to_end(tmp_path):
     assert s[
         "mean_bout_duration_seconds"
     ].dropna().eq(4.0).all()
+
+"""C4 regression tests for both review checklists."""
+import LabGym.comparative_transition_analysis as m
+
+
+def sample(a=(1,)*5, b=(0,)*5, fps_a=30, fps_b=30):
+    rows = []
+    for group, values, fps in [('Control', a, fps_a), ('Treatment', b, fps_b)]:
+        for i, value in enumerate(values):
+            rows.append(dict(group=group, source_recording=f'{group}_{i}', species='mouse',
+                             animal_id='0', source_behavior='walk', target_behavior='rest',
+                             transition_count=value, outgoing_count=10,
+                             transition_probability=value,
+                             probability_defined=np.isfinite(value),
+                             switching_rate_per_1000_frames=value, fps=fps, fps_source='explicit'))
+    transitions = pd.DataFrame(rows)
+    behaviors = pd.DataFrame([{**r, 'behavior':'walk', 'bout_count':r['transition_count'],
+                               'total_bout_frames':r['transition_count'],
+                               'mean_bout_frames':r['transition_count'],
+                               'median_bout_frames':r['transition_count'],
+                               'mean_bout_duration_seconds':r['transition_count'],
+                               'median_bout_duration_seconds':r['transition_count']} for r in rows])
+    return dict(groups=['Control','Treatment'], per_animal_transitions=transitions,
+                per_animal_behaviors=behaviors)
+
+
+def test_known_effect_and_cliffs_delta():
+    row = m.build_two_group_statistics(sample(), [('walk','rest')])['results'].iloc[0]
+    assert row.testable and row.test_type == 'exact'
+    assert row.permutation_count == 252
+    assert row.mean_difference_a_minus_b == 1
+    assert row.cliffs_delta_a_vs_b == 1
+    assert row.p_raw == pytest.approx(2/252)
+    assert row.significant_holm
+    assert row.difference_direction == 'Control - Treatment'
+
+
+def test_no_effect_is_reported_not_discarded():
+    row = m.build_two_group_statistics(sample(b=(1,)*5), [('walk','rest')])['results'].iloc[0]
+    assert row.testable and row.p_raw == 1
+    assert row.p_holm == 1 and not row.significant_holm
+
+
+def test_low_support_is_exported_with_reason(tmp_path):
+    result = m.build_two_group_statistics(sample(a=(0,0,0,0,np.nan)), [('walk','rest')], output_folder=tmp_path)
+    row = result['results'].iloc[0]
+    assert not row.testable and row.n_contributing_a == 4 and row.n_excluded_a == 1
+    assert 'insufficient_animals' in row.non_testable_reason
+    assert np.isnan(row.p_raw) and np.isnan(row.p_holm)
+    assert len(pd.read_csv(tmp_path/'two_group_permutation_statistics.csv')) == 1
+
+
+def test_observed_zero_is_valid_and_undefined_is_excluded():
+    c = sample(a=(0,0,0,0,0,np.nan), b=(0,)*5)
+    result = m.build_two_group_statistics(c, [('walk','rest')])
+    row = result['results'].iloc[0]
+    assert row.testable and row.n_contributing_a == 5 and row.n_excluded_a == 1
+    assert row.mean_a == 0 and row.p_raw == 1
+    animals = result['per_animal_values']
+    assert animals.excluded_from_test.sum() == 1
+    assert (animals.loc[animals.measurement_value.eq(0), 'excluded_from_test'] == False).all()
+
+
+def test_fps_incompatibility_blocks_only_switching_rate():
+    c = sample(fps_b=60)
+    specs = [dict(kind='transition', source_behavior='walk',target_behavior='rest',
+                  metric='switching_rate_per_1000_frames'), ('walk','rest'),
+             dict(kind='transition',source_behavior='walk',target_behavior='rest',metric='transition_count')]
+    rows = m.build_two_group_statistics(c, specs)['results']
+    assert not rows.iloc[0].testable and 'incompatible_fps' in rows.iloc[0].non_testable_reason
+    assert rows.iloc[1].testable and rows.iloc[2].testable
+    assert 'raw_counts_not_exposure_normalized' in rows.iloc[2].warnings
+
+
+def test_exact_threshold_and_randomized_seed():
+    exact = m.build_two_group_statistics(sample(a=(1,)*9,b=(0,)*9), [('walk','rest')])['results'].iloc[0]
+    assert exact.test_type == 'exact' and exact.permutation_count == 48620
+    c = sample(a=(1,)*10,b=(0,)*10)
+    one = m.build_two_group_statistics(c, [('walk','rest')], seed=123)['results'].iloc[0]
+    two = m.build_two_group_statistics(c, [('walk','rest')], seed=123)['results'].iloc[0]
+    assert one.test_type == 'randomized' and one.permutation_count == 100000
+    assert one.seed == 123 and one.p_raw == two.p_raw
+    assert 0 < one.p_raw <= 1
+
+
+def test_holm_all_eligible_only():
+    c = sample()
+    specs = [('walk','rest'),
+             dict(kind='behavior',behavior='walk',metric='mean_bout_duration_seconds'),
+             dict(kind='transition',source_behavior='walk',target_behavior='rest',metric='switching_rate_per_1000_frames')]
+    c['per_animal_transitions'].loc[c['per_animal_transitions'].group.eq('Treatment'), 'fps'] = 60
+    rows = m.build_two_group_statistics(c, specs)['results']
+    assert rows.testable.tolist() == [True, True, False]
+    assert rows.loc[:1,'p_holm'].tolist() == pytest.approx([4/252, 4/252])
+    assert np.isnan(rows.iloc[2].p_holm)
+
+
+def test_all_eligible_measurement_families_and_traceability(tmp_path):
+    c = sample()
+    specs = [dict(kind='transition',source_behavior='walk',target_behavior='rest',metric=x)
+             for x in ['transition_count','transition_probability','switching_rate_per_1000_frames']]
+    specs += [dict(kind='behavior',behavior='walk',metric=x) for x in
+              ['bout_count','total_bout_frames','mean_bout_frames','median_bout_frames',
+               'mean_bout_duration_seconds','median_bout_duration_seconds']]
+    output = m.build_two_group_statistics(c,specs,output_folder=tmp_path)
+    assert len(output['results']) == len(specs)
+    assert len(output['per_animal_values']) == len(specs)*10
+    assert {'group','source_recording','species','animal_id','fps','measurement_value',
+            'selection_label','excluded_from_test'}.issubset(output['per_animal_values'].columns)
+    exported = pd.read_csv(tmp_path/'two_group_permutation_statistics.csv')
+    assert len(exported) == len(specs)
+    assert {'n_contributing_a','n_contributing_b','n_excluded_a','n_excluded_b',
+            'mean_difference_a_minus_b','cliffs_delta_a_vs_b','p_raw','p_holm',
+            'warnings','test_type','permutation_count','seed','non_testable_reason'}.issubset(exported.columns)
+
+
+def test_only_confirmed_and_duplicate_guard():
+    c = sample()
+    assert m.build_two_group_statistics(c,[])['results'].empty
+    with pytest.raises(ValueError,match='Duplicate confirmed'):
+        m.build_two_group_statistics(c,[('walk','rest'),('walk','rest')])
+
+
+def test_c3_reverse_display_does_not_reverse_c4_contract():
+    c = sample()
+    c['difference_direction'] = 'B-A'
+    row = m.build_two_group_statistics(c,[('walk','rest')])['results'].iloc[0]
+    assert row.mean_difference_a_minus_b == 1
+    assert row.difference_direction == 'Control - Treatment'
