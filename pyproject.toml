@@ -55,6 +55,8 @@ dependencies=[
     'six',
     'pyobjc-framework-Cocoa;platform_system=="Darwin"',
     'pytest',
+    'scipy>=1.10,<1.14',
+    'statsmodels>=0.14.0,<0.15',
 ]
 requires-python='>=3.9,<3.11'
 readme='README.md'
