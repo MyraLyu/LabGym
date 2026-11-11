@@ -1635,7 +1635,6 @@ def build_comparative_analysis(
 # Dependencies: scipy, statsmodels (direct project dependencies).
 
 import math
-from itertools import combinations
 from scipy import stats as _c4_scipy_stats
 from statsmodels.stats.multitest import multipletests as _c4_multipletests
 
@@ -1643,9 +1642,8 @@ _C4_TRANSITION_METRICS = {
     "transition_count", "transition_probability", "switching_rate_per_1000_frames",
 }
 _C4_BEHAVIOR_METRICS = {
-    "bout_count", "total_bout_frames", "mean_bout_frames",
-    "median_bout_frames", "mean_bout_duration_seconds",
-    "median_bout_duration_seconds", "switching_rate_per_1000_frames",
+    "mean_bout_duration_seconds", "median_bout_duration_seconds",
+    "switching_rate_per_1000_frames",
 }
 _C4_ALLOWED_METRICS = _C4_TRANSITION_METRICS | _C4_BEHAVIOR_METRICS
 _C4_ID = IDENTITY
@@ -1701,42 +1699,34 @@ def _c4_cliffs_delta(a, b):
 
 
 def _c4_permutation(a, b, seed=0, exact_limit=100000, random_assignments=99999):
-    """Two-sided independent-label permutation test of mean(A)-mean(B).
+    """SciPy two-sided independent permutation test of mean(A) - mean(B).
 
-    Exact: enumerate all C(nA+nB,nA) distinct label assignments.
-    Randomized: 99,999 independent assignments plus the observed one;
-    p = (1 + number of random statistics as extreme) / 100,000.
+    Exact if there are at most 100,000 distinct assignments; otherwise
+    99,999 random resamples plus the observed arrangement (100,000 total).
+    SciPy's two-sided p-value is twice the smaller one-sided tail,
+    capped at one, rather than the absolute-statistic tail probability.
     """
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
-    n_a, n_b = len(a), len(b)
-    n = n_a + n_b
-    n_assignments = math.comb(n, n_a)
-    pooled = np.concatenate([a, b])
-    observed = float(a.mean() - b.mean())
-    total = float(pooled.sum())
-    tolerance = 1e-12 * max(1.0, abs(observed))
-    if n_assignments <= exact_limit:
-        extreme = 0
-        for indexes in combinations(range(n), n_a):
-            mean_a = sum(pooled[i] for i in indexes) / n_a
-            stat = mean_a - (total - n_a * mean_a) / n_b
-            extreme += abs(stat) >= abs(observed) - tolerance
-        return float(extreme / n_assignments), "exact", n_assignments, None
-    rng = np.random.default_rng(seed)
-    extreme = 0
-    # Vectorized batches limit memory use for large numbers of animals.
-    remaining = random_assignments
-    while remaining:
-        batch = min(1024, remaining)
-        # Each row is an independent uniformly sampled label assignment.
-        ranks = rng.random((batch, n))
-        idx = np.argpartition(ranks, n_a - 1, axis=1)[:, :n_a]
-        sums_a = pooled[idx].sum(axis=1)
-        simulated = sums_a / n_a - (total - sums_a) / n_b
-        extreme += int(np.count_nonzero(np.abs(simulated) >= abs(observed) - tolerance))
-        remaining -= batch
-    return float((extreme + 1) / (random_assignments + 1)), "randomized", random_assignments + 1, int(seed)
+    if not len(a) or not len(b) or not (np.isfinite(a).all() and np.isfinite(b).all()):
+        raise ValueError("Permutation samples must be nonempty and finite")
+    assignments = math.comb(len(a) + len(b), len(a))
+    exact = assignments <= exact_limit
+
+    def statistic(x, y):
+        return np.mean(x) - np.mean(y)
+
+    test = _c4_scipy_stats.permutation_test(
+        (a, b), statistic,
+        permutation_type="independent",
+        alternative="two-sided",
+        n_resamples=np.inf if exact else random_assignments,
+        random_state=None if exact else int(seed),
+        vectorized=False,
+    )
+    return (float(test.pvalue), "exact" if exact else "randomized",
+            int(assignments if exact else random_assignments + 1),
+            None if exact else int(seed))
 
 
 def _c4_values_for_selection(comparison, spec):
@@ -1816,7 +1806,7 @@ def build_two_group_statistics(
             fps = pd.to_numeric(valid_fps, errors="coerce").to_numpy(dtype=float)
             if len(fps) != sum(n_valid) or not np.isfinite(fps).all() or (len(fps) and np.ptp(fps) > fps_tolerance):
                 reason = (reason + "; " if reason else "") + "incompatible_fps_for_switching_rate"
-        if spec["metric"] in {"transition_count", "bout_count", "total_bout_frames"}:
+        if spec["metric"] == "transition_count":
             warnings.append("raw_counts_not_exposure_normalized")
         if sum(n_excluded):
             warnings.append("undefined_or_nonfinite_values_excluded")
@@ -1830,7 +1820,7 @@ def build_two_group_statistics(
                "mean_difference_a_minus_b": float(a.mean() - b.mean()) if len(a) and len(b) else np.nan,
                "cliffs_delta_a_vs_b": _c4_cliffs_delta(a, b),
                "testable": not bool(reason), "non_testable_reason": reason,
-               "p_raw": np.nan, "p_holm": np.nan, "significant_holm": False,
+               "p_raw": np.nan, "p_holm": np.nan, "significant_holm": None,
                "alpha": alpha, "test_type": "not_testable", "permutation_count": 0,
                "seed": np.nan, "warnings": "; ".join(warnings)}
         if not reason:
@@ -1846,7 +1836,12 @@ def build_two_group_statistics(
                 result.loc[eligible, "p_raw"].to_numpy(dtype=float),
                 alpha=alpha, method="holm")
             result.loc[eligible, "p_holm"] = corrected
-            result.loc[eligible, "significant_holm"] = rejected
+            result.loc[eligible, "significant_holm"] = pd.Series(
+                [bool(x) for x in rejected], index=result.index[eligible], dtype=object
+            )
+        # Keep non-testable significance genuinely missing, not False.
+        result["significant_holm"] = result["significant_holm"].astype(object)
+        result.loc[~eligible, "significant_holm"] = None
     animals = pd.concat(animal_rows, ignore_index=True) if animal_rows else pd.DataFrame()
     output = {"results": result, "per_animal_values": animals,
               "groups": groups, "alpha": alpha, "random_seed": int(seed)}

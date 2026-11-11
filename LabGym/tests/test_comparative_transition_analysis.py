@@ -807,9 +807,8 @@ def test_all_eligible_measurement_families_and_traceability(tmp_path):
     c = sample()
     specs = [dict(kind='transition',source_behavior='walk',target_behavior='rest',metric=x)
              for x in ['transition_count','transition_probability','switching_rate_per_1000_frames']]
-    specs += [dict(kind='behavior',behavior='walk',metric=x) for x in
-              ['bout_count','total_bout_frames','mean_bout_frames','median_bout_frames',
-               'mean_bout_duration_seconds','median_bout_duration_seconds']]
+    specs += [dict(kind='behavior', behavior='walk', metric=x)
+              for x in ['mean_bout_duration_seconds','median_bout_duration_seconds',]]
     output = m.build_two_group_statistics(c,specs,output_folder=tmp_path)
     assert len(output['results']) == len(specs)
     assert len(output['per_animal_values']) == len(specs)*10
@@ -835,3 +834,93 @@ def test_c3_reverse_display_does_not_reverse_c4_contract():
     row = m.build_two_group_statistics(c,[('walk','rest')])['results'].iloc[0]
     assert row.mean_difference_a_minus_b == 1
     assert row.difference_direction == 'Control - Treatment'
+
+import importlib.util
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import pytest
+
+SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "comparative_transition_analysis.py"
+)
+spec = importlib.util.spec_from_file_location('comparative_c4_reviewed', SOURCE)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+
+def fixture(a, b, metric='transition_count', fps_a=30, fps_b=30):
+    rows = []
+    for group, values, fps in [('A', a, fps_a), ('B', b, fps_b)]:
+        for i, value in enumerate(values):
+            rows.append(dict(group=group, source_recording=f'{group}_video', species=None,
+                             animal_id=str(i), source_behavior='walk', target_behavior='rest',
+                             transition_count=value, transition_probability=value,
+                             switching_rate_per_1000_frames=value, fps=fps))
+    transitions = pd.DataFrame(rows)
+    behaviors = transitions.rename(columns={'source_behavior':'behavior'}).copy()
+    behaviors['mean_bout_duration_seconds'] = behaviors['transition_count']
+    behaviors['median_bout_duration_seconds'] = behaviors['transition_count']
+    return {'groups':['A','B'], 'per_animal_transitions':transitions,
+            'per_animal_behaviors':behaviors}
+
+
+def test_negative_effect_and_cliffs_delta():
+    result = m.build_two_group_statistics(fixture([1]*5,[5]*5), [('walk','rest')])['results'].iloc[0]
+    assert result.mean_difference_a_minus_b == -4
+    assert result.cliffs_delta_a_vs_b == -1
+    assert result.test_type == 'exact'
+    assert result.permutation_count == 252
+
+
+def test_non_testable_significance_null(tmp_path):
+    result = m.build_two_group_statistics(fixture([1]*4,[2]*5), [('walk','rest')], output_folder=tmp_path)['results'].iloc[0]
+    assert result.testable == False
+    assert pd.isna(result.significant_holm)
+    assert pd.isna(result.p_raw) and pd.isna(result.p_holm)
+    exported = pd.read_csv(tmp_path/'two_group_permutation_statistics.csv')
+    assert pd.isna(exported.loc[0,'significant_holm'])
+
+
+def test_disallowed_metrics():
+    for metric in ['bout_count','total_bout_frames','mean_bout_frames','median_bout_frames']:
+        with pytest.raises(ValueError, match='Unsupported'):
+            m._c4_selection({'kind':'behavior','behavior':'walk','metric':metric})
+
+
+def test_randomized_seed_reproducible():
+    a=np.arange(11,dtype=float)
+    b=np.arange(11,22,dtype=float)
+    r1=m._c4_permutation(a,b,seed=17)
+    r2=m._c4_permutation(a,b,seed=17)
+    assert r1==r2
+    assert r1[1:] == ('randomized',100000,17)
+
+
+def test_holm_and_no_effect():
+    comparison=fixture([2]*5,[2]*5)
+    result=m.build_two_group_statistics(comparison,[('walk','rest'),
+        {'kind':'behavior','behavior':'walk','metric':'mean_bout_duration_seconds'}])['results']
+    assert len(result)==2
+    assert (result['p_raw']==1).all()
+    assert (result['p_holm']==1).all()
+    assert (result['significant_holm']==False).all()
+
+
+def test_undefined_probability_excluded_zero_kept():
+    comparison=fixture([0,0,0,0,np.nan],[1]*5)
+    result=m.build_two_group_statistics(comparison,[('walk','rest')])['results'].iloc[0]
+    # Selection shorthand uses transition probability: one undefined is excluded.
+    assert result.n_contributing_a == 4
+    assert result.n_excluded_a == 1
+    assert not result.testable
+
+
+def test_fps_block_only_switching_rate():
+    comparison=fixture([1]*5,[2]*5,fps_a=30,fps_b=60)
+    selections=[{'kind':'transition','source_behavior':'walk','target_behavior':'rest',
+                 'metric':metric} for metric in ['transition_count','switching_rate_per_1000_frames']]
+    result=m.build_two_group_statistics(comparison,selections)['results'].set_index('metric')
+    assert bool(result.loc['transition_count','testable'])
+    assert not bool(result.loc['switching_rate_per_1000_frames','testable'])
