@@ -1,5 +1,4 @@
-
-"""Regression tests for LabGym comparative transitions: C1 + C2."""
+"""Regression tests for LabGym comparative transition analysis."""
 
 from pathlib import Path
 
@@ -136,7 +135,7 @@ def make_pair(
 
 
 # ============================================================
-# C1: TRANSITION COUNTING
+# TRANSITION COUNTING
 # ============================================================
 
 def test_na_break(tmp_path):
@@ -364,7 +363,7 @@ def test_all_na_animal_retained(tmp_path):
 
 
 # ============================================================
-# C2: PER-ANIMAL MEASUREMENTS
+# PER-ANIMAL MEASUREMENTS
 # ============================================================
 
 def test_per_animal_bouts(tmp_path):
@@ -430,7 +429,7 @@ def test_no_animal_pooling(tmp_path):
     assert t["transition_count"].sum() == 2
 
 
-def test_c2_excluded_and_all_na(tmp_path):
+def test_excluded_and_all_na(tmp_path):
     a = write_result_workbook(
         tmp_path,
         "a",
@@ -537,7 +536,7 @@ def test_species_export(tmp_path):
 
 
 # ============================================================
-# C2: FPS PRIORITY AND VALIDATION
+# FPS PRIORITY AND VALIDATION
 # ============================================================
 
 def test_explicit_fps_priority(tmp_path):
@@ -707,7 +706,7 @@ def test_rounded_clock_end_to_end(tmp_path):
         "mean_bout_duration_seconds"
     ].dropna().eq(4.0).all()
 
-"""C4 regression tests for both review checklists."""
+"""Two-group statistical regression tests."""
 import LabGym.comparative_transition_analysis as m
 
 
@@ -828,26 +827,13 @@ def test_only_confirmed_and_duplicate_guard():
         m.build_two_group_statistics(c,[('walk','rest'),('walk','rest')])
 
 
-def test_c3_reverse_display_does_not_reverse_c4_contract():
+def test_reverse_display_does_not_reverse_statistical_contract():
     c = sample()
     c['difference_direction'] = 'B-A'
     row = m.build_two_group_statistics(c,[('walk','rest')])['results'].iloc[0]
     assert row.mean_difference_a_minus_b == 1
     assert row.difference_direction == 'Control - Treatment'
 
-import importlib.util
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import pytest
-
-SOURCE = (
-    Path(__file__).resolve().parent
-    / "comparative_transition_analysis.py"
-)
-spec = importlib.util.spec_from_file_location('comparative_c4_reviewed', SOURCE)
-m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
 
 
 def fixture(a, b, metric='transition_count', fps_a=30, fps_b=30):
@@ -886,14 +872,14 @@ def test_non_testable_significance_null(tmp_path):
 def test_disallowed_metrics():
     for metric in ['bout_count','total_bout_frames','mean_bout_frames','median_bout_frames']:
         with pytest.raises(ValueError, match='Unsupported'):
-            m._c4_selection({'kind':'behavior','behavior':'walk','metric':metric})
+            m._normalize_confirmed_selection({'kind':'behavior','behavior':'walk','metric':metric})
 
 
 def test_randomized_seed_reproducible():
     a=np.arange(11,dtype=float)
     b=np.arange(11,22,dtype=float)
-    r1=m._c4_permutation(a,b,seed=17)
-    r2=m._c4_permutation(a,b,seed=17)
+    r1=m._permutation_test(a,b,seed=17)
+    r2=m._permutation_test(a,b,seed=17)
     assert r1==r2
     assert r1[1:] == ('randomized',100000,17)
 

@@ -1,5 +1,4 @@
-
-"""Checkpoint 3 regression tests for comparative transition analysis.
+"""Regression tests for comparative transition group summaries and visualization.
 
 Tests:
 - Shared behavior alphabet
@@ -35,8 +34,8 @@ from LabGym.comparative_transition_analysis import (
 # ============================================================
 
 @pytest.fixture
-def c3_data():
-    """Create synthetic C2-style per-animal data.
+def group_summary_data():
+    """Create synthetic per-animal transition and behavior measurements.
 
     Control:
         Animal 0: A -> B probability 1.0
@@ -145,8 +144,8 @@ def c3_data():
 
 
 @pytest.fixture
-def comparison(c3_data):
-    transitions, behaviors = c3_data
+def comparison(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     return build_group_summaries(
         transitions,
@@ -190,8 +189,8 @@ def test_shared_behavior_alphabet(comparison):
         ]
 
 
-def test_custom_behavior_order(c3_data):
-    transitions, behaviors = c3_data
+def test_custom_behavior_order(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     result = build_group_summaries(
         transitions,
@@ -210,8 +209,8 @@ def test_custom_behavior_order(c3_data):
     ]
 
 
-def test_invalid_behavior_order(c3_data):
-    transitions, behaviors = c3_data
+def test_invalid_behavior_order(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     with pytest.raises(ValueError):
         build_group_summaries(
@@ -263,8 +262,8 @@ def test_no_pooled_transition_probability(comparison):
 # TEST 3 — OBSERVED ZERO VS UNDEFINED
 # ============================================================
 
-def test_observed_zero_contributes(c3_data):
-    transitions, _ = c3_data
+def test_observed_zero_contributes(group_summary_data):
+    transitions, _ = group_summary_data
 
     zero = transitions[
         (transitions["group"] == "control")
@@ -360,8 +359,8 @@ def test_signed_difference_zero(comparison):
     ] == pytest.approx(0.0)
 
 
-def test_signed_difference_positive(c3_data):
-    transitions, behaviors = c3_data
+def test_signed_difference_positive(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     # Change treated animals to probability 1.
     mask = (
@@ -492,8 +491,8 @@ def test_empty_selection(comparison):
 # TEST 8 — EXPORTS
 # ============================================================
 
-def test_group_csv_exports(c3_data, tmp_path):
-    transitions, behaviors = c3_data
+def test_group_csv_exports(group_summary_data, tmp_path):
+    transitions, behaviors = group_summary_data
 
     result = build_group_summaries(
         transitions,
@@ -526,8 +525,8 @@ def test_group_csv_exports(c3_data, tmp_path):
     )
 
 
-def test_export_preserves_nan(c3_data, tmp_path):
-    transitions, behaviors = c3_data
+def test_export_preserves_nan(group_summary_data, tmp_path):
+    transitions, behaviors = group_summary_data
 
     build_group_summaries(
         transitions,
@@ -547,8 +546,8 @@ def test_export_preserves_nan(c3_data, tmp_path):
 # TEST 9 — INPUT VALIDATION
 # ============================================================
 
-def test_duplicate_animal_behavior_rejected(c3_data):
-    transitions, behaviors = c3_data
+def test_duplicate_animal_behavior_rejected(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     duplicate = behaviors.iloc[[0]].copy()
 
@@ -564,8 +563,8 @@ def test_duplicate_animal_behavior_rejected(c3_data):
         )
 
 
-def test_missing_group_rejected(c3_data):
-    transitions, behaviors = c3_data
+def test_missing_group_rejected(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     transitions = transitions[
         transitions["group"] == "control"
@@ -582,8 +581,8 @@ def test_missing_group_rejected(c3_data):
         )
 
 
-def test_mismatched_identity_rejected(c3_data):
-    transitions, behaviors = c3_data
+def test_mismatched_identity_rejected(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     behaviors = behaviors.copy()
 
@@ -599,8 +598,8 @@ def test_mismatched_identity_rejected(c3_data):
         )
 
 
-def test_incompatible_behavior_alphabet(c3_data):
-    transitions, behaviors = c3_data
+def test_incompatible_behavior_alphabet(group_summary_data):
+    transitions, behaviors = group_summary_data
 
     behaviors = behaviors[
         ~(
@@ -641,8 +640,8 @@ def test_plot_comparison_matrices(comparison, tmp_path):
     plt.close(fig)
 
 
-def test_direction_default_and_reversible(c3_data):
-    t, b = c3_data
+def test_direction_default_and_reversible(group_summary_data):
+    t, b = group_summary_data
     t = t.copy()
     mask = (t.group == "treated") & (t.source_behavior == "A") & (t.target_behavior == "B")
     t.loc[mask, "transition_probability"] = 1.0
@@ -654,8 +653,8 @@ def test_direction_default_and_reversible(c3_data):
     pd.testing.assert_frame_equal(result["transition_summary"], reverse["transition_summary"])
     assert reverse["difference_direction_label"] == "treated - control"
 
-def test_direction_export_and_plot(c3_data, tmp_path):
-    t, b = c3_data
+def test_direction_export_and_plot(group_summary_data, tmp_path):
+    t, b = group_summary_data
     result = build_group_summaries(t, b, output_folder=tmp_path)
     assert "control - treated" in pd.read_csv(tmp_path / "group_signed_differences.csv")["difference_direction"].unique()
     assert "control - treated" in pd.read_csv(tmp_path / "signed_difference_matrix.csv").columns[0]
@@ -681,8 +680,8 @@ def test_confirmation_and_animal_trace(comparison):
     assert ab["source_recording"].notna().all()
     assert np.isnan(ab.loc[(ab.group == "control") & (ab.source_recording == "video2"), "transition_probability"].iloc[0])
 
-def test_equal_weighting_unequal_denominators(c3_data):
-    t, b = c3_data
+def test_equal_weighting_unequal_denominators(group_summary_data):
+    t, b = group_summary_data
     t = t.copy()
     for animal, outgoing, ab_count in [("0", 1, 1), ("1", 9, 0)]:
         mask = (t.group == "control") & (t.source_recording == "video1") & (t.animal_id == animal) & (t.source_behavior == "A")

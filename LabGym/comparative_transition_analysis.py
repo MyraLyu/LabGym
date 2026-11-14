@@ -564,7 +564,7 @@ def build_per_animal_measurements(
                 "No included behaviors"
             )
 
-        c1 = load_recording(
+        recording_transitions = load_recording(
             folder,
             recording["group"],
             recording["behaviors"],
@@ -621,12 +621,12 @@ def build_per_animal_measurements(
                     })
 
                 if species is None:
-                    species_mask = c1["species"].isna()
+                    species_mask = recording_transitions["species"].isna()
                 else:
-                    species_mask = c1["species"].eq(species)
+                    species_mask = recording_transitions["species"].eq(species)
 
-                subset = c1[
-                    (c1["animal_id"] == animal_id)
+                subset = recording_transitions[
+                    (recording_transitions["animal_id"] == animal_id)
                     & species_mask
                 ].copy()
 
@@ -731,7 +731,7 @@ def build_per_animal_measurements(
 # — VALIDATION AND SHARED ALPHABET
 # ============================================================
 
-def _c3_validate(transition_df, behavior_df, group_order=None):
+def _validate_group_comparison(transition_df, behavior_df, group_order=None):
     """Validate per-animal tables and resolve a shared behavior alphabet."""
     if transition_df.empty or behavior_df.empty:
         raise ValueError("Per-animal input tables must not be empty")
@@ -851,7 +851,7 @@ def _c3_validate(transition_df, behavior_df, group_order=None):
     return alphabet, groups
 
 
-def _c3_align_edges(transition_df, alphabet, groups):
+def _align_transition_edges(transition_df, alphabet, groups):
     """Construct the shared directed edge alphabet."""
     observed = set(
         zip(
@@ -897,7 +897,7 @@ def _c3_align_edges(transition_df, alphabet, groups):
     return pd.DataFrame(rows), allowed
 
 
-def _c3_summary(frame, group_columns, metrics):
+def _summarize_animal_metrics(frame, group_columns, metrics):
     """Summarize animal-level metrics using equal animal weights.
 
     NaN values do not contribute to a mean. Observed zeros do.
@@ -945,7 +945,7 @@ def _c3_summary(frame, group_columns, metrics):
 def top_group_transitions(transition_summary, groups, top_n=5):
     """Rank directed transitions separately by each group's mean probability.
 
-    Undefined means and zero-probability edges are not ranked. Equal means
+    Undefined means are not ranked; defined zero-probability edges remain eligible. Equal means
     are resolved by source then target name for reproducible exports.
     """
     columns = ["group", "rank", "source_behavior", "target_behavior",
@@ -960,7 +960,6 @@ def top_group_transitions(transition_summary, groups, top_n=5):
             frame["mean_transition_probability"], errors="coerce")
         frame = frame.loc[
             np.isfinite(frame["mean_transition_probability"])
-            & frame["mean_transition_probability"].gt(0)
         ].sort_values(
             ["mean_transition_probability", "source_behavior", "target_behavior"],
             ascending=[False, True, True], kind="stable"
@@ -995,7 +994,7 @@ def build_group_summaries(
     """
     if difference_direction not in ("A-B", "B-A"):
         raise ValueError("difference_direction must be A-B or B-A")
-    alphabet, groups = _c3_validate(
+    alphabet, groups = _validate_group_comparison(
         transition_df,
         behavior_df,
         group_order,
@@ -1015,7 +1014,7 @@ def build_group_summaries(
 
         alphabet = order
 
-    edges_grid, edges = _c3_align_edges(
+    edges_grid, edges = _align_transition_edges(
         transition_df,
         alphabet,
         groups,
@@ -1028,7 +1027,7 @@ def build_group_summaries(
         "switching_rate_per_1000_frames",
     ]
 
-    edge_summary = _c3_summary(
+    edge_summary = _summarize_animal_metrics(
         transition_df,
         [
             "group",
@@ -1066,7 +1065,7 @@ def build_group_summaries(
         "animal_transition_count",
     ]
 
-    behavior_summary = _c3_summary(
+    behavior_summary = _summarize_animal_metrics(
         behavior_df,
         ["group", "behavior"],
         behavior_metrics,
@@ -1666,21 +1665,21 @@ def build_comparative_analysis(
 # Dependencies: scipy, statsmodels (direct project dependencies).
 
 import math
-from scipy import stats as _c4_scipy_stats
-from statsmodels.stats.multitest import multipletests as _c4_multipletests
+from scipy import stats as _scipy_stats
+from statsmodels.stats.multitest import multipletests as _multipletests
 
-_C4_TRANSITION_METRICS = {
+_TRANSITION_TEST_METRICS = {
     "transition_count", "transition_probability", "switching_rate_per_1000_frames",
 }
-_C4_BEHAVIOR_METRICS = {
+_BEHAVIOR_TEST_METRICS = {
     "mean_bout_duration_seconds", "median_bout_duration_seconds",
     "switching_rate_per_1000_frames",
 }
-_C4_ALLOWED_METRICS = _C4_TRANSITION_METRICS | _C4_BEHAVIOR_METRICS
-_C4_ID = IDENTITY
+_ALLOWED_TEST_METRICS = _TRANSITION_TEST_METRICS | _BEHAVIOR_TEST_METRICS
+_ANIMAL_IDENTITY_COLUMNS = IDENTITY
 
 
-def _c4_selection(selection):
+def _normalize_confirmed_selection(selection):
     """Normalize one user-confirmed measurement specification.
 
     Accepted forms:
@@ -1701,7 +1700,7 @@ def _c4_selection(selection):
     metric = item.get("metric", "transition_probability" if kind == "transition" else None)
     if kind not in ("transition", "behavior"):
         raise ValueError("Selection kind must be 'transition' or 'behavior'")
-    allowed = _C4_TRANSITION_METRICS if kind == "transition" else _C4_BEHAVIOR_METRICS
+    allowed = _TRANSITION_TEST_METRICS if kind == "transition" else _BEHAVIOR_TEST_METRICS
     if metric not in allowed:
         raise ValueError(f"Unsupported {kind} metric: {metric!r}")
     if kind == "transition":
@@ -1719,7 +1718,7 @@ def _c4_selection(selection):
             "selection_label": label}
 
 
-def _c4_cliffs_delta(a, b):
+def _cliffs_delta(a, b):
     """Cliff's delta: positive means Group A tends to exceed Group B."""
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
@@ -1729,7 +1728,7 @@ def _c4_cliffs_delta(a, b):
                   np.count_nonzero(a[:, None] < b[None, :])) / (len(a) * len(b)))
 
 
-def _c4_permutation(a, b, seed=0, exact_limit=100000, random_assignments=99999):
+def _permutation_test(a, b, seed=0, exact_limit=100000, random_assignments=99999):
     """SciPy two-sided independent permutation test of mean(A) - mean(B).
 
     Exact if there are at most 100,000 distinct assignments; otherwise
@@ -1747,7 +1746,7 @@ def _c4_permutation(a, b, seed=0, exact_limit=100000, random_assignments=99999):
     def statistic(x, y):
         return np.mean(x) - np.mean(y)
 
-    test = _c4_scipy_stats.permutation_test(
+    test = _scipy_stats.permutation_test(
         (a, b), statistic,
         permutation_type="independent",
         alternative="two-sided",
@@ -1760,7 +1759,7 @@ def _c4_permutation(a, b, seed=0, exact_limit=100000, random_assignments=99999):
             None if exact else int(seed))
 
 
-def _c4_values_for_selection(comparison, spec):
+def _values_for_confirmed_selection(comparison, spec):
     """Return per-animal source rows, preserving recording identity and FPS."""
     if spec["kind"] == "transition":
         frame = comparison["per_animal_transitions"]
@@ -1775,7 +1774,7 @@ def _c4_values_for_selection(comparison, spec):
         raise ValueError(f"Confirmed measurement does not exist: {spec['selection_label']}")
     if spec["metric"] not in subset.columns:
         raise ValueError(f"Missing measurement column: {spec['metric']}")
-    if subset.duplicated(_C4_ID).any():
+    if subset.duplicated(_ANIMAL_IDENTITY_COLUMNS).any():
         raise ValueError(f"Duplicate animal-level observations: {spec['selection_label']}")
     subset["measurement_value"] = pd.to_numeric(subset[spec["metric"]], errors="coerce")
     subset["excluded_from_test"] = ~np.isfinite(subset["measurement_value"].to_numpy(dtype=float))
@@ -1807,13 +1806,13 @@ def build_two_group_statistics(
     groups = list(comparison["groups"])
     if len(groups) != 2 or groups[0] == groups[1]:
         raise ValueError("Exactly two distinct groups are required")
-    selections = [_c4_selection(x) for x in confirmed_selections]
+    selections = [_normalize_confirmed_selection(x) for x in confirmed_selections]
     labels = [x["selection_label"] for x in selections]
     if len(labels) != len(set(labels)):
         raise ValueError("Duplicate confirmed selections")
     rows, animal_rows = [], []
     for spec in selections:
-        subset = _c4_values_for_selection(comparison, spec)
+        subset = _values_for_confirmed_selection(comparison, spec)
         if not set(subset["group"]).issubset(set(groups)):
             raise ValueError("Unexpected group in per-animal observations")
         subset["group_role"] = subset["group"].map({groups[0]: "A", groups[1]: "B"})
@@ -1849,13 +1848,13 @@ def build_two_group_statistics(
                "mean_a": float(a.mean()) if len(a) else np.nan,
                "mean_b": float(b.mean()) if len(b) else np.nan,
                "mean_difference_a_minus_b": float(a.mean() - b.mean()) if len(a) and len(b) else np.nan,
-               "cliffs_delta_a_vs_b": _c4_cliffs_delta(a, b),
+               "cliffs_delta_a_vs_b": _cliffs_delta(a, b),
                "testable": not bool(reason), "non_testable_reason": reason,
                "p_raw": np.nan, "p_holm": np.nan, "significant_holm": None,
                "alpha": alpha, "test_type": "not_testable", "permutation_count": 0,
                "seed": np.nan, "warnings": "; ".join(warnings)}
         if not reason:
-            p, method, count, used_seed = _c4_permutation(a, b, seed=int(seed))
+            p, method, count, used_seed = _permutation_test(a, b, seed=int(seed))
             row.update(p_raw=p, test_type=method, permutation_count=count,
                        seed=used_seed if used_seed is not None else np.nan)
         rows.append(row)
@@ -1863,7 +1862,7 @@ def build_two_group_statistics(
     if not result.empty:
         eligible = result["testable"].astype(bool)
         if eligible.any():
-            rejected, corrected, _, _ = _c4_multipletests(
+            rejected, corrected, _, _ = _multipletests(
                 result.loc[eligible, "p_raw"].to_numpy(dtype=float),
                 alpha=alpha, method="holm")
             result.loc[eligible, "p_holm"] = corrected
