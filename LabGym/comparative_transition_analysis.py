@@ -1,12 +1,4 @@
-"""LabGym Comparative Transition Analysis — Checkpoints 1, 2, 3, and 4.
-
-C1: Per-recording, per-animal transition counts and identity.
-C2: Per-animal bout durations, switching rates, and FPS inference.
-C3: Shared behavior alignment, equal-weighted group summaries,
-    aligned matrices, signed differences, and transition selection.
-
-C4: Dedicated two-group per-animal permutation inference for confirmed selections.
-"""
+"""LabGym comparative transition analysis: per-animal measurements, group comparisons and permutation inference."""
 
 import ast
 import re
@@ -25,7 +17,7 @@ IDENTITY = [
 
 
 # ============================================================
-# CHECKPOINT 1 — INPUTS AND TRANSITION COUNTS
+# — INPUTS AND TRANSITION COUNTS
 # ============================================================
 
 def _event(value):
@@ -320,7 +312,7 @@ def build_transition_dataset(
 
 
 # ============================================================
-# CHECKPOINT 2 — FPS INFERENCE
+# — FPS INFERENCE
 # ============================================================
 
 def _fps(folder, time_index, explicit=None):
@@ -462,7 +454,7 @@ def _fps(folder, time_index, explicit=None):
 
 
 # ============================================================
-# CHECKPOINT 2 — PER-ANIMAL BOUT MEASUREMENTS
+# — PER-ANIMAL BOUT MEASUREMENTS
 # ============================================================
 
 def _bouts(cells, selected):
@@ -736,11 +728,11 @@ def build_per_animal_measurements(
 
 
 # ============================================================
-# CHECKPOINT 3 — VALIDATION AND SHARED ALPHABET
+# — VALIDATION AND SHARED ALPHABET
 # ============================================================
 
 def _c3_validate(transition_df, behavior_df, group_order=None):
-    """Validate C2 tables and resolve a shared behavior alphabet."""
+    """Validate per-animal tables and resolve a shared behavior alphabet."""
     if transition_df.empty or behavior_df.empty:
         raise ValueError("Per-animal input tables must not be empty")
 
@@ -780,7 +772,7 @@ def _c3_validate(transition_df, behavior_df, group_order=None):
 
     if len(groups) != 2:
         raise ValueError(
-            "Checkpoint 3 requires exactly two groups"
+            "Comparative analysis requires exactly two groups"
         )
 
     if group_order is not None:
@@ -795,7 +787,7 @@ def _c3_validate(transition_df, behavior_df, group_order=None):
         groups = requested
 
     if set(behavior_df["group"]) != set(groups):
-        raise ValueError("Group mismatch between C2 tables")
+        raise ValueError("Group mismatch between per-animal tables")
 
     alphabet = list(pd.unique(behavior_df["behavior"]))
 
@@ -839,7 +831,7 @@ def _c3_validate(transition_df, behavior_df, group_order=None):
                 f"Duplicate per-animal observations: {keys}"
             )
 
-    # Require the same set of animals in both C2 exports.
+    # Require the same set of animals in both per-animal exports.
     def identity_set(frame):
         return set(
             tuple(
@@ -853,7 +845,7 @@ def _c3_validate(transition_df, behavior_df, group_order=None):
 
     if identity_set(transition_df) != identity_set(behavior_df):
         raise ValueError(
-            "Per-animal identities differ between C2 tables"
+            "Per-animal identities differ between per-animal tables"
         )
 
     return alphabet, groups
@@ -947,8 +939,38 @@ def _c3_summary(frame, group_columns, metrics):
 
 
 # ============================================================
-# CHECKPOINT 3 — GROUP SUMMARIES
+# — GROUP SUMMARIES
 # ============================================================
+
+def top_group_transitions(transition_summary, groups, top_n=5):
+    """Rank directed transitions separately by each group's mean probability.
+
+    Undefined means and zero-probability edges are not ranked. Equal means
+    are resolved by source then target name for reproducible exports.
+    """
+    columns = ["group", "rank", "source_behavior", "target_behavior",
+               "mean_transition_probability", "n_animals",
+               "n_contributing_transition_probability"]
+    result = []
+    for group in groups:
+        frame = transition_summary.loc[
+            transition_summary["group"].eq(group)
+        ].copy()
+        frame["mean_transition_probability"] = pd.to_numeric(
+            frame["mean_transition_probability"], errors="coerce")
+        frame = frame.loc[
+            np.isfinite(frame["mean_transition_probability"])
+            & frame["mean_transition_probability"].gt(0)
+        ].sort_values(
+            ["mean_transition_probability", "source_behavior", "target_behavior"],
+            ascending=[False, True, True], kind="stable"
+        ).head(top_n).copy()
+        frame["rank"] = np.arange(1, len(frame) + 1)
+        if "n_contributing_transition_probability" not in frame:
+            frame["n_contributing_transition_probability"] = np.nan
+        result.append(frame[columns])
+    return pd.concat(result, ignore_index=True) if result else pd.DataFrame(columns=columns)
+
 
 def build_group_summaries(
     transition_df,
@@ -1124,7 +1146,11 @@ def build_group_summaries(
         columns=alphabet,
     )
 
+    top_transitions = top_group_transitions(edge_summary, groups)
+
     result = {
+        "top_transitions": top_transitions,
+        "top_transitions_by_group": {group: top_transitions.loc[top_transitions["group"].eq(group)].copy() for group in groups},
         "groups": groups,
         "difference_direction": difference_direction,
         "difference_direction_label": direction_label,
@@ -1144,6 +1170,11 @@ def build_group_summaries(
             parents=True,
             exist_ok=True,
         )
+
+        top_transitions.to_csv(destination / "group_top_5_transitions.csv", index=False)
+        for i, group in enumerate(groups, 1):
+            top_transitions.loc[top_transitions["group"].eq(group)].to_csv(
+                destination / f"group_{i}_top_5_transitions.csv", index=False)
 
         edge_summary.to_csv(
             destination / "group_transition_summary.csv",
@@ -1224,7 +1255,7 @@ def export_signed_differences(comparison, output_folder):
 
 
 # ============================================================
-# CHECKPOINT 3 — TRANSITION SELECTION
+# — TRANSITION SELECTION
 # ============================================================
 
 def select_transitions(comparison, selected_pairs, include_animals=False):
@@ -1271,7 +1302,7 @@ def select_transitions(comparison, selected_pairs, include_animals=False):
 
 
 # ============================================================
-# CHECKPOINT 3 — ALIGNED MATRIX VISUALIZATION
+# — ALIGNED MATRIX VISUALIZATION
 # ============================================================
 
 def plot_comparison_matrices(
@@ -1400,7 +1431,7 @@ def plot_comparison_matrices(
 
 
 # ============================================================
-# CHECKPOINT 3 — INTERACTIVE TRANSITION MATRIX
+# — INTERACTIVE TRANSITION MATRIX
 # ============================================================
 
 def launch_transition_selector(comparison):
@@ -1561,7 +1592,7 @@ def launch_transition_selector(comparison):
 
 
 # ============================================================
-# COMBINED C1 + C2 + C3 PIPELINE
+#
 # ============================================================
 
 def build_comparative_analysis(
@@ -1573,7 +1604,7 @@ def build_comparative_analysis(
     include_self=False,
     difference_direction="A-B",
 ):
-    """Run all three checkpoints in one pipeline.
+    """Run the comparative transition analysis pipeline.
 
     Parameters
     ----------
@@ -1629,7 +1660,7 @@ def build_comparative_analysis(
 
 
 # ============================================================
-# CHECKPOINT 4 — CONFIRMED TWO-GROUP PERMUTATION STATISTICS
+# — CONFIRMED TWO-GROUP PERMUTATION STATISTICS
 # ============================================================
 # This path is independent of Mine Results statistics.
 # Dependencies: scipy, statsmodels (direct project dependencies).
@@ -1759,9 +1790,9 @@ def build_two_group_statistics(
     comparison, confirmed_selections, output_folder=None, seed=0,
     alpha=0.05, min_animals=5, fps_tolerance=0.01,
 ):
-    """C4: test only confirmed measurements using independent animals.
+    """Test only confirmed measurements using independent animals.
 
-    Group A/B follow comparison['groups'], independent of C3 display sign.
+    Group A/B follow comparison['groups'], independent of display sign.
     Undefined probabilities are excluded; observed zeroes remain valid.
     Switching rates are blocked only if contributing animals have
     incompatible FPS. Holm is applied to all testable selections in this run.
@@ -1859,7 +1890,7 @@ def build_comparative_analysis_with_statistics(
     include_self=False, difference_direction="A-B", alpha=0.05,
     min_animals=5, fps_tolerance=0.01,
 ):
-    """Run C1+C2+C3+C4, without changing the original C1-C3 API."""
+    """Run comparative analysis with confirmed-selection permutation inference."""
     comparison = build_comparative_analysis(
         recordings, output_folder=output_folder, group_order=group_order,
         behavior_order=behavior_order, collapse_repeats=collapse_repeats,

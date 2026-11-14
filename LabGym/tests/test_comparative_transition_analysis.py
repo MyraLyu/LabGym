@@ -842,7 +842,7 @@ import pandas as pd
 import pytest
 
 SOURCE = (
-    Path(__file__).resolve().parents[1]
+    Path(__file__).resolve().parent
     / "comparative_transition_analysis.py"
 )
 spec = importlib.util.spec_from_file_location('comparative_c4_reviewed', SOURCE)

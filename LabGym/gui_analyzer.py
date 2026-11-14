@@ -2221,3 +2221,92 @@ class PanelLv2_StateTransitionMap(wx.Panel):
 				'Error',
 				wx.OK|wx.ICON_ERROR
 			)
+
+class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
+    """Two-group comparative transition analysis and Top 5 summaries."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.group_folders = [None, None]
+        self.output_folder = None
+        self.display_window()
+
+    def display_window(self):
+        layout = wx.BoxSizer(wx.VERTICAL)
+        layout.Add(wx.StaticText(self, label='Comparative Transition Analysis — Group A vs Group B'), 0, wx.ALL, 12)
+        self.folder_labels = []
+        for index, name in enumerate(('A', 'B')):
+            line = wx.BoxSizer(wx.HORIZONTAL)
+            button = wx.Button(self, label=f'Select Group {name}\nrecordings folder', size=(300, 40))
+            button.Bind(wx.EVT_BUTTON, lambda event, i=index: self.select_group(i))
+            label = wx.StaticText(self, label='None.')
+            self.folder_labels.append(label)
+            line.Add(button, 0, wx.ALL, 8)
+            line.Add(label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+            layout.Add(line, 0, wx.EXPAND)
+        layout.Add(wx.StaticText(self, label='Behavior names (comma-separated; identical for both groups):'), 0, wx.ALL, 8)
+        self.behaviors_input = wx.TextCtrl(self)
+        layout.Add(self.behaviors_input, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        line = wx.BoxSizer(wx.HORIZONTAL)
+        button = wx.Button(self, label='Select output\nfolder', size=(300, 40))
+        button.Bind(wx.EVT_BUTTON, self.select_output)
+        self.output_label = wx.StaticText(self, label='None.')
+        line.Add(button, 0, wx.ALL, 8)
+        line.Add(self.output_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        layout.Add(line, 0, wx.EXPAND)
+        generate = wx.Button(self, label='Generate comparative analysis and Top 5', size=(330, 40))
+        generate.Bind(wx.EVT_BUTTON, self.generate)
+        layout.Add(generate, 0, wx.ALL | wx.ALIGN_RIGHT, 10)
+        self.summary = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY)
+        layout.Add(self.summary, 1, wx.EXPAND | wx.ALL, 8)
+        self.SetSizer(layout)
+
+    def select_group(self, index):
+        dialog = wx.DirDialog(self, f'Select folder containing Group {"AB"[index]} recording subfolders')
+        if dialog.ShowModal() == wx.ID_OK:
+            self.group_folders[index] = dialog.GetPath()
+            self.folder_labels[index].SetLabel(self.group_folders[index])
+        dialog.Destroy()
+
+    def select_output(self, event):
+        dialog = wx.DirDialog(self, 'Select output folder')
+        if dialog.ShowModal() == wx.ID_OK:
+            self.output_folder = dialog.GetPath()
+            self.output_label.SetLabel(self.output_folder)
+        dialog.Destroy()
+
+    def generate(self, event):
+        from .comparative_transition_analysis import build_comparative_analysis, _workbooks
+        if not all(self.group_folders) or not self.output_folder:
+            wx.MessageBox('Select both group folders and an output folder.', 'Missing input', wx.OK | wx.ICON_ERROR)
+            return
+        behaviors = [x.strip() for x in self.behaviors_input.GetValue().split(',') if x.strip()]
+        if len(behaviors) < 2 or len(behaviors) != len(set(behaviors)):
+            wx.MessageBox('Enter at least two distinct behavior names.', 'Invalid behaviors', wx.OK | wx.ICON_ERROR)
+            return
+        try:
+            recordings = []
+            for group, root in zip(('A', 'B'), self.group_folders):
+                root = Path(root)
+                folders = ([root] if _workbooks(root) else
+                           sorted(x for x in root.iterdir() if x.is_dir() and _workbooks(x)))
+                if not folders:
+                    raise ValueError(f'No event-probability workbooks found for Group {group}: {root}')
+                recordings.extend(dict(folder=str(folder), group=group, behaviors=behaviors, excluded=[])
+                                  for folder in folders)
+            comparison = build_comparative_analysis(recordings, output_folder=self.output_folder,
+                                                    group_order=('A', 'B'), behavior_order=behaviors)
+            lines = []
+            for group in ('A', 'B'):
+                lines.append(f'GROUP {group} — TOP 5 TRANSITIONS')
+                subset = comparison['top_transitions_by_group'][group]
+                if subset.empty:
+                    lines.append('No positive, defined transitions.')
+                for row in subset.itertuples():
+                    lines.append(f'{row.rank}. {row.source_behavior} → {row.target_behavior}: '
+                                 f'{row.mean_transition_probability:.4f}')
+                lines.append('')
+            lines.append(f'CSV results saved in: {self.output_folder}')
+            self.summary.SetValue('\n'.join(lines))
+        except Exception as exc:
+            wx.MessageBox(f'Comparative analysis failed:\n{exc}', 'Error', wx.OK | wx.ICON_ERROR)
