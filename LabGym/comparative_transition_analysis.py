@@ -1468,6 +1468,7 @@ def launch_transition_selector(comparison):
         )
     )
 
+    fig._transition_selector_confirmed = False
     fig.subplots_adjust(bottom=0.29)
 
     ax.set_xlim(
@@ -1578,6 +1579,7 @@ def launch_transition_selector(comparison):
     )
 
     def done(_event):
+        fig._transition_selector_confirmed = True
         plt.close(fig)
 
     done_button.on_clicked(done)

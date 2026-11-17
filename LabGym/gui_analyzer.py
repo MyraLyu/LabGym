@@ -2223,17 +2223,32 @@ class PanelLv2_StateTransitionMap(wx.Panel):
 			)
 
 class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
-    """Two-group comparative transition analysis and Top 5 summaries."""
+    """Two-group comparison with explicit transition confirmation and statistics."""
+
+    TRANSITION_METRICS = (
+        ('Transition probability', 'transition_probability'),
+        ('Transition count', 'transition_count'),
+        ('Switching rate per 1000 frames', 'switching_rate_per_1000_frames'),
+    )
+    BEHAVIOR_METRICS = (
+        ('Mean bout duration (seconds)', 'mean_bout_duration_seconds'),
+        ('Median bout duration (seconds)', 'median_bout_duration_seconds'),
+        ('Switching rate per 1000 frames', 'switching_rate_per_1000_frames'),
+    )
 
     def __init__(self, parent):
         super().__init__(parent)
         self.group_folders = [None, None]
         self.output_folder = None
+        self.comparison = None
+        self.confirmed_pairs = None
         self.display_window()
 
     def display_window(self):
         layout = wx.BoxSizer(wx.VERTICAL)
-        layout.Add(wx.StaticText(self, label='Comparative Transition Analysis — Group A vs Group B'), 0, wx.ALL, 12)
+        layout.Add(wx.StaticText(self, label='Comparative Transition Analysis — Group A vs Group B'),
+                   0, wx.ALL, 12)
+        layout.Add(wx.StaticText(self, label='Setup Comparison'), 0, wx.ALL, 8)
         self.folder_labels = []
         for index, name in enumerate(('A', 'B')):
             line = wx.BoxSizer(wx.HORIZONTAL)
@@ -2244,8 +2259,10 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
             line.Add(button, 0, wx.ALL, 8)
             line.Add(label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
             layout.Add(line, 0, wx.EXPAND)
-        layout.Add(wx.StaticText(self, label='Behavior names (comma-separated; identical for both groups):'), 0, wx.ALL, 8)
+        layout.Add(wx.StaticText(self, label='Behavior names (comma-separated; identical for both groups):'),
+                   0, wx.ALL, 8)
         self.behaviors_input = wx.TextCtrl(self)
+        self.behaviors_input.Bind(wx.EVT_TEXT, self.invalidate_comparison)
         layout.Add(self.behaviors_input, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         line = wx.BoxSizer(wx.HORIZONTAL)
         button = wx.Button(self, label='Select output\nfolder', size=(300, 40))
@@ -2254,26 +2271,54 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
         line.Add(button, 0, wx.ALL, 8)
         line.Add(self.output_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         layout.Add(line, 0, wx.EXPAND)
-        generate = wx.Button(self, label='Generate comparative analysis and Top 5', size=(330, 40))
-        generate.Bind(wx.EVT_BUTTON, self.generate)
-        layout.Add(generate, 0, wx.ALL | wx.ALIGN_RIGHT, 10)
+
+        layout.Add(wx.StaticText(self, label='Select Statistics'), 0, wx.ALL, 8)
+        actions = wx.BoxSizer(wx.HORIZONTAL)
+        self.generate_button = wx.Button(self, label='Generate comparison and Top 5', size=(260, 40))
+        self.generate_button.Bind(wx.EVT_BUTTON, self.generate)
+        self.select_button = wx.Button(self, label='Select and confirm transitions', size=(260, 40))
+        self.select_button.Bind(wx.EVT_BUTTON, self.select_transitions)
+        self.stats_button = wx.Button(self, label='Select statistics and run', size=(260, 40))
+        self.stats_button.Bind(wx.EVT_BUTTON, self.run_statistics)
+        for button in (self.generate_button, self.select_button, self.stats_button):
+            actions.Add(button, 0, wx.ALL, 5)
+        layout.Add(actions, 0, wx.ALL, 5)
+        self.selection_label = wx.StaticText(self, label='Generate a comparison to enable transition selection.')
+        layout.Add(self.selection_label, 0, wx.ALL, 8)
         self.summary = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY)
         layout.Add(self.summary, 1, wx.EXPAND | wx.ALL, 8)
         self.SetSizer(layout)
+        self.update_actions()
+
+    def update_actions(self):
+        self.select_button.Enable(self.comparison is not None)
+        self.stats_button.Enable(bool(self.confirmed_pairs))
+
+    def invalidate_comparison(self, event=None):
+        self.comparison = None
+        self.confirmed_pairs = None
+        self.selection_label.SetLabel('Generate a comparison to enable transition selection.')
+        self.update_actions()
 
     def select_group(self, index):
         dialog = wx.DirDialog(self, f'Select folder containing Group {"AB"[index]} recording subfolders')
-        if dialog.ShowModal() == wx.ID_OK:
-            self.group_folders[index] = dialog.GetPath()
-            self.folder_labels[index].SetLabel(self.group_folders[index])
-        dialog.Destroy()
+        try:
+            if dialog.ShowModal() == wx.ID_OK:
+                self.group_folders[index] = dialog.GetPath()
+                self.folder_labels[index].SetLabel(self.group_folders[index])
+                self.invalidate_comparison()
+        finally:
+            dialog.Destroy()
 
     def select_output(self, event):
         dialog = wx.DirDialog(self, 'Select output folder')
-        if dialog.ShowModal() == wx.ID_OK:
-            self.output_folder = dialog.GetPath()
-            self.output_label.SetLabel(self.output_folder)
-        dialog.Destroy()
+        try:
+            if dialog.ShowModal() == wx.ID_OK:
+                self.output_folder = dialog.GetPath()
+                self.output_label.SetLabel(self.output_folder)
+                self.invalidate_comparison()
+        finally:
+            dialog.Destroy()
 
     def generate(self, event):
         from .comparative_transition_analysis import build_comparative_analysis, _workbooks
@@ -2284,6 +2329,7 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
         if len(behaviors) < 2 or len(behaviors) != len(set(behaviors)):
             wx.MessageBox('Enter at least two distinct behavior names.', 'Invalid behaviors', wx.OK | wx.ICON_ERROR)
             return
+        self.invalidate_comparison()
         try:
             recordings = []
             for group, root in zip(('A', 'B'), self.group_folders):
@@ -2294,19 +2340,208 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
                     raise ValueError(f'No event-probability workbooks found for Group {group}: {root}')
                 recordings.extend(dict(folder=str(folder), group=group, behaviors=behaviors, excluded=[])
                                   for folder in folders)
-            comparison = build_comparative_analysis(recordings, output_folder=self.output_folder,
-                                                    group_order=('A', 'B'), behavior_order=behaviors)
+            comparison = build_comparative_analysis(
+                recordings, output_folder=self.output_folder,
+                group_order=('A', 'B'), behavior_order=behaviors)
+            self.comparison = comparison
             lines = []
             for group in ('A', 'B'):
                 lines.append(f'GROUP {group} — TOP 5 TRANSITIONS')
                 subset = comparison['top_transitions_by_group'][group]
                 if subset.empty:
-                    lines.append('No positive, defined transitions.')
+                    lines.append('No defined transitions available.')
+                if 0 < len(subset) < 5:
+                    lines.append(f'Only {len(subset)} defined transitions available (fewer than 5).')
                 for row in subset.itertuples():
                     lines.append(f'{row.rank}. {row.source_behavior} → {row.target_behavior}: '
                                  f'{row.mean_transition_probability:.4f}')
                 lines.append('')
             lines.append(f'CSV results saved in: {self.output_folder}')
             self.summary.SetValue('\n'.join(lines))
+            self.selection_label.SetLabel('Comparison ready. Select transitions in the matrix and click Done.')
         except Exception as exc:
             wx.MessageBox(f'Comparative analysis failed:\n{exc}', 'Error', wx.OK | wx.ICON_ERROR)
+        finally:
+            self.update_actions()
+
+    def select_transitions(self, event):
+        """Show all three comparison matrices and confirm selected directed edges."""
+        import wx.grid as gridlib
+        import pandas as pd
+
+        if self.comparison is None:
+            return
+
+        comparison = self.comparison
+        behaviors = list(comparison['behaviors'])
+        matrices = [
+            ('Group A', comparison['probability_matrices']['A']),
+            ('Group B', comparison['probability_matrices']['B']),
+            ('Difference (A - B)', comparison['difference_matrix']),
+        ]
+        available = set(zip(
+            comparison['signed_differences']['source_behavior'],
+            comparison['signed_differences']['target_behavior'],
+        ))
+        selected = set(self.confirmed_pairs or ())
+        dialog = wx.Dialog(
+            self, title='Select and Confirm Transitions',
+            size=(min(1050, max(680, len(behaviors) * 95 + 250)), 690),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        root = wx.BoxSizer(wx.VERTICAL)
+        instructions = wx.StaticText(
+            dialog, label='Click cells in any matrix to select directed transitions. '
+                          'Rows = source; columns = target. Double-click for per-animal values.'
+        )
+        root.Add(instructions, 0, wx.EXPAND | wx.ALL, 10)
+        notebook = wx.Notebook(dialog)
+        grids = []
+
+        def update_selection_label():
+            if selected:
+                labels = [f'{a} → {b}' for a, b in sorted(selected)]
+                selection_label.SetLabel(f'{len(labels)} selected: ' + ', '.join(labels))
+            else:
+                selection_label.SetLabel('No transitions selected')
+            for grid in grids:
+                for row, source in enumerate(behaviors):
+                    for col, target in enumerate(behaviors):
+                        pair = (source, target)
+                        if pair in selected:
+                            color = wx.Colour(115, 185, 255)
+                        elif pair not in available:
+                            color = wx.Colour(230, 230, 230)
+                        else:
+                            color = wx.WHITE
+                        grid.SetCellBackgroundColour(row, col, color)
+                grid.ForceRefresh()
+
+        def show_animal_values(pair):
+            data = comparison.get('per_animal_transitions')
+            if data is None or data.empty:
+                wx.MessageBox('No per-animal transition data available.', 'Per-animal values')
+                return
+            subset = data.loc[
+                data['source_behavior'].eq(pair[0]) &
+                data['target_behavior'].eq(pair[1])
+            ]
+            columns = [c for c in ('group', 'animal_id', 'recording', 'video',
+                                   'transition_probability', 'transition_count')
+                       if c in subset.columns]
+            if not columns:
+                columns = list(subset.columns)
+            body = subset[columns].to_string(index=False) if not subset.empty else 'No animal values available.'
+            detail = wx.Dialog(dialog, title=f'Per-animal: {pair[0]} → {pair[1]}',
+                               size=(720, 430), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+            detail_sizer = wx.BoxSizer(wx.VERTICAL)
+            text = wx.TextCtrl(detail, value=body, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
+            detail_sizer.Add(text, 1, wx.EXPAND | wx.ALL, 10)
+            close_button = wx.Button(detail, wx.ID_OK, 'Close')
+            detail_sizer.Add(close_button, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
+            detail.SetSizer(detail_sizer)
+            detail.ShowModal()
+            detail.Destroy()
+
+        for title, matrix in matrices:
+            page = wx.Panel(notebook)
+            page_sizer = wx.BoxSizer(wx.VERTICAL)
+            grid = gridlib.Grid(page)
+            grid.CreateGrid(len(behaviors), len(behaviors))
+            grid.EnableEditing(False)
+            grid.SetRowLabelSize(max(110, max(map(len, behaviors)) * 9))
+            grid.SetColLabelSize(50)
+            grid.SetDefaultColSize(88, resizeExistingCols=True)
+            for index, name in enumerate(behaviors):
+                grid.SetRowLabelValue(index, name)
+                grid.SetColLabelValue(index, name)
+            for row, source in enumerate(behaviors):
+                for col, target in enumerate(behaviors):
+                    value = matrix.loc[source, target]
+                    grid.SetCellValue(row, col, '' if pd.isna(value) else f'{value:.4f}')
+                    grid.SetCellAlignment(row, col, wx.ALIGN_CENTRE, wx.ALIGN_CENTRE)
+
+            def on_click(evt):
+                pair = (behaviors[evt.GetRow()], behaviors[evt.GetCol()])
+                if pair in available:
+                    if pair in selected:
+                        selected.remove(pair)
+                    else:
+                        selected.add(pair)
+                    update_selection_label()
+                evt.Skip()
+
+            def on_double_click(evt):
+                pair = (behaviors[evt.GetRow()], behaviors[evt.GetCol()])
+                if pair in available:
+                    show_animal_values(pair)
+                evt.Skip()
+
+            grid.Bind(gridlib.EVT_GRID_CELL_LEFT_CLICK, on_click)
+            grid.Bind(gridlib.EVT_GRID_CELL_LEFT_DCLICK, on_double_click)
+            page_sizer.Add(grid, 1, wx.EXPAND | wx.ALL, 6)
+            page.SetSizer(page_sizer)
+            notebook.AddPage(page, title)
+            grids.append(grid)
+
+        root.Add(notebook, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        selection_label = wx.StaticText(dialog, label='')
+        root.Add(selection_label, 0, wx.EXPAND | wx.ALL, 10)
+        buttons = wx.StdDialogButtonSizer()
+        confirm = wx.Button(dialog, wx.ID_OK, 'Done — Confirm Selection')
+        cancel = wx.Button(dialog, wx.ID_CANCEL, 'Cancel')
+        buttons.AddButton(confirm)
+        buttons.AddButton(cancel)
+        buttons.Realize()
+        root.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
+        dialog.SetSizer(root)
+        update_selection_label()
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                self.selection_label.SetLabel('Selection not confirmed; previous selection preserved.')
+                return
+            self.confirmed_pairs = tuple(sorted(selected))
+            if self.confirmed_pairs:
+                self.selection_label.SetLabel(
+                    f'Confirmed {len(self.confirmed_pairs)} transitions: ' +
+                    ', '.join(f'{a} → {b}' for a, b in self.confirmed_pairs)
+                )
+            else:
+                self.selection_label.SetLabel('No transitions selected. Reopen the matrices to select transitions.')
+        finally:
+            dialog.Destroy()
+            self.update_actions()
+
+    def run_statistics(self, event):
+        from .comparative_transition_analysis import build_two_group_statistics
+        if self.comparison is None or not self.confirmed_pairs:
+            wx.MessageBox('Confirm at least one transition first.', 'Missing selection', wx.OK | wx.ICON_ERROR)
+            return
+        choices = [label for label, _ in self.TRANSITION_METRICS]
+        dialog = wx.MultiChoiceDialog(self, 'Choose statistics for the confirmed transitions.',
+                                      'Select Statistics', choices=choices)
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            metrics = [self.TRANSITION_METRICS[i][1] for i in dialog.GetSelections()]
+        finally:
+            dialog.Destroy()
+        if not metrics:
+            wx.MessageBox('Select at least one statistic.', 'Missing statistics', wx.OK | wx.ICON_WARNING)
+            return
+        specs = [dict(kind='transition', source_behavior=source, target_behavior=target, metric=metric)
+                 for source, target in self.confirmed_pairs for metric in metrics]
+        try:
+            result = build_two_group_statistics(
+                self.comparison, specs, output_folder=self.output_folder)
+            frame = result['results']
+            testable = int(frame['testable'].sum()) if not frame.empty else 0
+            self.summary.AppendText(
+                f'\nSTATISTICS\nConfirmed transitions: {len(self.confirmed_pairs)}'
+                f'\nSelected metrics: {", ".join(metrics)}'
+                f'\nMeasurements: {len(frame)}; testable: {testable}'
+                f'\nSaved in: {self.output_folder}\n')
+            wx.MessageBox('Statistics complete. Check the output folder for CSV results.',
+                          'Done', wx.OK | wx.ICON_INFORMATION)
+        except Exception as exc:
+            wx.MessageBox(f'Statistical analysis failed:\n{exc}', 'Error', wx.OK | wx.ICON_ERROR)
