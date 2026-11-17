@@ -2222,6 +2222,25 @@ class PanelLv2_StateTransitionMap(wx.Panel):
 				wx.OK|wx.ICON_ERROR
 			)
 
+def format_comparative_top_transitions(top_transitions_by_group, groups=('A', 'B'), limit=5):
+    """Format descriptive group rankings without triggering interactive statistics."""
+    lines = []
+    for group in groups:
+        lines.append(f'GROUP {group} — TOP {limit} TRANSITIONS')
+        subset = top_transitions_by_group[group].head(limit)
+        if subset.empty:
+            lines.append('No defined transitions available.')
+        elif len(subset) < limit:
+            lines.append(f'Only {len(subset)} defined transitions available (fewer than {limit}).')
+        for row in subset.itertuples():
+            lines.append(
+                f'{row.rank}. {row.source_behavior} → {row.target_behavior}: '
+                f'{row.mean_transition_probability:.4f}'
+            )
+        lines.append('')
+    return '\n'.join(lines)
+
+
 class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
     """Two-group comparison with explicit transition confirmation and statistics."""
 
@@ -2272,17 +2291,20 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
         line.Add(self.output_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         layout.Add(line, 0, wx.EXPAND)
 
-        layout.Add(wx.StaticText(self, label='Select Statistics'), 0, wx.ALL, 8)
-        actions = wx.BoxSizer(wx.HORIZONTAL)
+        # Comparison and transition selection are separate from statistical testing.
+        comparison_actions = wx.BoxSizer(wx.HORIZONTAL)
         self.generate_button = wx.Button(self, label='Generate comparison and Top 5', size=(260, 40))
         self.generate_button.Bind(wx.EVT_BUTTON, self.generate)
         self.select_button = wx.Button(self, label='Select and confirm transitions', size=(260, 40))
         self.select_button.Bind(wx.EVT_BUTTON, self.select_transitions)
+        for button in (self.generate_button, self.select_button):
+            comparison_actions.Add(button, 0, wx.ALL, 5)
+        layout.Add(comparison_actions, 0, wx.LEFT | wx.RIGHT | wx.TOP, 5)
+
+        layout.Add(wx.StaticText(self, label='Select Statistics'), 0, wx.LEFT | wx.TOP, 10)
         self.stats_button = wx.Button(self, label='Select statistics and run', size=(260, 40))
         self.stats_button.Bind(wx.EVT_BUTTON, self.run_statistics)
-        for button in (self.generate_button, self.select_button, self.stats_button):
-            actions.Add(button, 0, wx.ALL, 5)
-        layout.Add(actions, 0, wx.ALL, 5)
+        layout.Add(self.stats_button, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 10)
         self.selection_label = wx.StaticText(self, label='Generate a comparison to enable transition selection.')
         layout.Add(self.selection_label, 0, wx.ALL, 8)
         self.summary = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY)
@@ -2344,18 +2366,7 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
                 recordings, output_folder=self.output_folder,
                 group_order=('A', 'B'), behavior_order=behaviors)
             self.comparison = comparison
-            lines = []
-            for group in ('A', 'B'):
-                lines.append(f'GROUP {group} — TOP 5 TRANSITIONS')
-                subset = comparison['top_transitions_by_group'][group]
-                if subset.empty:
-                    lines.append('No defined transitions available.')
-                if 0 < len(subset) < 5:
-                    lines.append(f'Only {len(subset)} defined transitions available (fewer than 5).')
-                for row in subset.itertuples():
-                    lines.append(f'{row.rank}. {row.source_behavior} → {row.target_behavior}: '
-                                 f'{row.mean_transition_probability:.4f}')
-                lines.append('')
+            lines = [format_comparative_top_transitions(comparison['top_transitions_by_group'])]
             lines.append(f'CSV results saved in: {self.output_folder}')
             self.summary.SetValue('\n'.join(lines))
             self.selection_label.SetLabel('Comparison ready. Select transitions in the matrix and click Done.')
@@ -2503,8 +2514,8 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
             self.confirmed_pairs = tuple(sorted(selected))
             if self.confirmed_pairs:
                 self.selection_label.SetLabel(
-                    f'Confirmed {len(self.confirmed_pairs)} transitions: ' +
-                    ', '.join(f'{a} → {b}' for a, b in self.confirmed_pairs)
+                    f'Confirmed {len(self.confirmed_pairs)} transitions. '
+                    'Click "Select and confirm transitions" to review or edit.'
                 )
             else:
                 self.selection_label.SetLabel('No transitions selected. Reopen the matrices to select transitions.')
