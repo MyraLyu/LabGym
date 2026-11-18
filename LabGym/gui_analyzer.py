@@ -2241,6 +2241,38 @@ def format_comparative_top_transitions(top_transitions_by_group, groups=('A', 'B
     return '\n'.join(lines)
 
 
+def confirmed_group_top_transitions(comparison, confirmed_pairs, limit=5):
+    """Rank only user-confirmed directed edges, independently within each group."""
+    from .comparative_transition_analysis import top_group_transitions
+
+    groups = tuple(comparison.get('groups', ('A', 'B')))
+    selected = set(map(tuple, confirmed_pairs or ()))
+    summary = comparison['transition_summary']
+    mask = [
+        (source, target) in selected
+        for source, target in zip(summary['source_behavior'], summary['target_behavior'])
+    ]
+    return top_group_transitions(summary.loc[mask], groups, top_n=limit)
+
+
+def format_per_animal_transition_details(comparison, pair):
+    """Include recording provenance and all available measurement traceability."""
+    from .comparative_transition_analysis import selected_per_animal_values
+
+    subset = selected_per_animal_values(comparison, [pair])
+    preferred = (
+        'group', 'source_recording', 'species', 'animal_id',
+        'source_behavior', 'target_behavior', 'transition_probability',
+        'transition_count', 'switching_rate_per_1000_frames',
+        'fps', 'fps_source',
+    )
+    columns = [name for name in preferred if name in subset.columns]
+    columns += [name for name in subset.columns if name not in columns]
+    if subset.empty:
+        return 'No per-animal measurements available for this transition.'
+    return subset[columns].to_string(index=False)
+
+
 class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
     """Two-group comparison with explicit transition confirmation and statistics."""
 
@@ -2261,6 +2293,7 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
         self.output_folder = None
         self.comparison = None
         self.confirmed_pairs = None
+        self.statistics_summary = None
         self.display_window()
 
     def display_window(self):
@@ -2319,6 +2352,8 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
     def invalidate_comparison(self, event=None):
         self.comparison = None
         self.confirmed_pairs = None
+        self.statistics_summary = None
+        self.summary.SetValue('')
         self.selection_label.SetLabel('Generate a comparison to enable transition selection.')
         self.update_actions()
 
@@ -2364,10 +2399,11 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
                                   for folder in folders)
             comparison = build_comparative_analysis(
                 recordings, output_folder=self.output_folder,
-                group_order=('A', 'B'), behavior_order=behaviors)
+                group_order=('A', 'B'), behavior_order=behaviors,
+                export_top_transitions=False)
             self.comparison = comparison
-            lines = [format_comparative_top_transitions(comparison['top_transitions_by_group'])]
-            lines.append(f'CSV results saved in: {self.output_folder}')
+            lines = ['Comparison generated. Select and confirm transitions to view Group A and Group B Top 5 rankings.']
+            lines.append(f'Comparison CSV results saved in: {self.output_folder}')
             self.summary.SetValue('\n'.join(lines))
             self.selection_label.SetLabel('Comparison ready. Select transitions in the matrix and click Done.')
         except Exception as exc:
@@ -2429,20 +2465,7 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
                 grid.ForceRefresh()
 
         def show_animal_values(pair):
-            data = comparison.get('per_animal_transitions')
-            if data is None or data.empty:
-                wx.MessageBox('No per-animal transition data available.', 'Per-animal values')
-                return
-            subset = data.loc[
-                data['source_behavior'].eq(pair[0]) &
-                data['target_behavior'].eq(pair[1])
-            ]
-            columns = [c for c in ('group', 'animal_id', 'recording', 'video',
-                                   'transition_probability', 'transition_count')
-                       if c in subset.columns]
-            if not columns:
-                columns = list(subset.columns)
-            body = subset[columns].to_string(index=False) if not subset.empty else 'No animal values available.'
+            body = format_per_animal_transition_details(comparison, pair)
             detail = wx.Dialog(dialog, title=f'Per-animal: {pair[0]} → {pair[1]}',
                                size=(720, 430), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
             detail_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -2512,6 +2535,39 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
                 self.selection_label.SetLabel('Selection not confirmed; previous selection preserved.')
                 return
             self.confirmed_pairs = tuple(sorted(selected))
+            self.statistics_summary = None
+            if self.confirmed_pairs:
+                from .comparative_transition_analysis import top_group_transitions
+                ranked = confirmed_group_top_transitions(self.comparison, self.confirmed_pairs)
+                groups = tuple(self.comparison.get('groups', ('A', 'B')))
+                group_rankings = {
+                    group: ranked.loc[ranked['group'].eq(group)].copy()
+                    for group in groups
+                }
+                self.summary.SetValue(
+                    format_comparative_top_transitions(group_rankings, groups=groups) +
+                    f'\nConfirmed transition rankings saved in: {self.output_folder}'
+                )
+                if self.output_folder:
+                    destination = Path(self.output_folder)
+                    destination.mkdir(parents=True, exist_ok=True)
+                    ranked.to_csv(destination / 'group_top_5_transitions.csv', index=False)
+                    for index, group in enumerate(groups, 1):
+                        group_rankings[group].to_csv(
+                            destination / f'group_{index}_top_5_transitions.csv',
+                            index=False,
+                        )
+            else:
+                self.summary.SetValue(
+                    'No transitions confirmed. Select transitions to generate Top 5 summaries.'
+                )
+                if self.output_folder:
+                    for filename in (
+                        'group_top_5_transitions.csv',
+                        'group_1_top_5_transitions.csv',
+                        'group_2_top_5_transitions.csv',
+                    ):
+                        (Path(self.output_folder) / filename).unlink(missing_ok=True)
             if self.confirmed_pairs:
                 self.selection_label.SetLabel(
                     f'Confirmed {len(self.confirmed_pairs)} transitions. '

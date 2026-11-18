@@ -910,3 +910,78 @@ def test_fps_block_only_switching_rate():
     result=m.build_two_group_statistics(comparison,selections)['results'].set_index('metric')
     assert bool(result.loc['transition_count','testable'])
     assert not bool(result.loc['switching_rate_per_1000_frames','testable'])
+
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pandas as pd
+import pytest
+
+pytest.importorskip('wx')
+from LabGym import gui_analyzer as gui
+from LabGym import comparative_transition_analysis as backend
+
+
+def example_comparison():
+    rows = []
+    for group, probabilities in [('A', [0.9, 0.5, 0.0]), ('B', [0.1, 0.7, 0.0])]:
+        for (source, target), value in zip([('a', 'b'), ('b', 'c'), ('c', 'a')], probabilities):
+            rows.append(dict(group=group, source_behavior=source, target_behavior=target,
+                             mean_transition_probability=value, n_animals=2,
+                             n_contributing_transition_probability=2))
+    animal = pd.DataFrame([dict(group='A', source_recording='/data/recording_01',
+                                species='mouse', animal_id=4, source_behavior='a',
+                                target_behavior='b', transition_probability=0.5,
+                                transition_count=3, fps=30, fps_source='metadata')])
+    return {'groups': ('A', 'B'), 'transition_summary': pd.DataFrame(rows),
+            'per_animal_transitions': animal,
+            'signed_differences': pd.DataFrame([{'source_behavior': 'a', 'target_behavior': 'b'}])}
+
+
+def test_rank_only_confirmed_pairs_and_keep_zero():
+    result = gui.confirmed_group_top_transitions(
+        example_comparison(), [('b', 'c'), ('c', 'a')]
+    )
+    assert set(zip(result.source_behavior, result.target_behavior)) == {('b', 'c'), ('c', 'a')}
+    assert len(result) == 4
+    assert (result.mean_transition_probability == 0).sum() == 2
+    assert result.loc[result.group.eq('A'), 'source_behavior'].tolist() == ['b', 'c']
+    assert result.loc[result.group.eq('B'), 'source_behavior'].tolist() == ['b', 'c']
+
+
+def test_empty_confirmation_has_no_ranked_edges():
+    result = gui.confirmed_group_top_transitions(example_comparison(), [])
+    assert result.empty
+
+
+def test_drill_down_has_recording_and_traceability():
+    data = example_comparison()
+    # backend selector checks allowed pairs through signed_differences
+    text = gui.format_per_animal_transition_details(data, ('a', 'b'))
+    for value in ('source_recording', '/data/recording_01', 'species', 'mouse',
+                  'animal_id', 'transition_probability', 'fps_source', 'metadata'):
+        assert value in text
+
+
+def test_generate_does_not_show_rankings_or_launch_statistics(monkeypatch, tmp_path):
+    folders = [tmp_path / name for name in ('a', 'b', 'out')]
+    for folder in folders:
+        folder.mkdir()
+    monkeypatch.setattr(backend, '_workbooks', lambda path: ['events.xlsx'])
+    build = Mock(return_value=example_comparison())
+    monkeypatch.setattr(backend, 'build_comparative_analysis', build)
+    fake = SimpleNamespace(
+        group_folders=[str(folders[0]), str(folders[1])], output_folder=str(folders[2]),
+        behaviors_input=SimpleNamespace(GetValue=lambda: 'a,b,c'),
+        comparison=None, confirmed_pairs=None,
+        summary=SimpleNamespace(SetValue=Mock()),
+        selection_label=SimpleNamespace(SetLabel=Mock()),
+        invalidate_comparison=Mock(), update_actions=Mock(),
+        select_transitions=Mock(), run_statistics=Mock(),
+    )
+    gui.PanelLv2_ComparativeTransitionAnalysis.generate(fake, None)
+    assert 'Select and confirm transitions' in fake.summary.SetValue.call_args.args[0]
+    assert 'TOP 5 TRANSITIONS' not in fake.summary.SetValue.call_args.args[0]
+    fake.select_transitions.assert_not_called()
+    fake.run_statistics.assert_not_called()
+    assert build.call_args.kwargs['export_top_transitions'] is False

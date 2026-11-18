@@ -1604,6 +1604,7 @@ def build_comparative_analysis(
     collapse_repeats=True,
     include_self=False,
     difference_direction="A-B",
+    export_top_transitions=True,
 ):
     """Run the comparative transition analysis pipeline.
 
@@ -1652,6 +1653,15 @@ def build_comparative_analysis(
         output_folder=output_folder,
         difference_direction=difference_direction,
     )
+
+    if output_folder is not None and not export_top_transitions:
+        folder = Path(output_folder)
+        for filename in (
+            "group_top_5_transitions.csv",
+            "group_1_top_5_transitions.csv",
+            "group_2_top_5_transitions.csv",
+        ):
+            (folder / filename).unlink(missing_ok=True)
 
     comparison["per_animal_transitions"] = transitions
     comparison["per_animal_behaviors"] = behaviors
