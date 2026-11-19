@@ -25,6 +25,8 @@ from pathlib import Path
 from tkinter import dialog
 import numpy as np
 
+from LabGym.comparative_transition_heatmap import export_comparative_transition_heatmap
+
 # Log the load of this module (by the module loader, on first import).
 # Intentionally positioning these statements before other imports, against the
 # guidance of PEP-8, to log the load before other imports log messages.
@@ -2326,7 +2328,7 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
 
         # Comparison and transition selection are separate from statistical testing.
         comparison_actions = wx.BoxSizer(wx.HORIZONTAL)
-        self.generate_button = wx.Button(self, label='Generate comparison and Top 5', size=(260, 40))
+        self.generate_button = wx.Button(self, label='Generate comparison', size=(260, 40))
         self.generate_button.Bind(wx.EVT_BUTTON, self.generate)
         self.select_button = wx.Button(self, label='Select and confirm transitions', size=(260, 40))
         self.select_button.Bind(wx.EVT_BUTTON, self.select_transitions)
@@ -2536,6 +2538,22 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
                 return
             self.confirmed_pairs = tuple(sorted(selected))
             self.statistics_summary = None
+
+            # Export heatmap after confirming selected transitions.
+            if self.output_folder:
+                from .comparative_transition_heatmap import (
+                    export_comparative_transition_heatmap,
+                )
+
+                heatmap_path = export_comparative_transition_heatmap(
+                    comparison=self.comparison,
+                    confirmed_pairs=self.confirmed_pairs,
+                    output_folder=self.output_folder,
+                    filename='selected_transition_heatmaps.png',
+                    group_titles=('Control', 'Treatment'),
+                    dpi=200,
+                )
+
             if self.confirmed_pairs:
                 from .comparative_transition_analysis import top_group_transitions
                 ranked = confirmed_group_top_transitions(self.comparison, self.confirmed_pairs)
