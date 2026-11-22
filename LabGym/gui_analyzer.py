@@ -2539,21 +2539,6 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
             self.confirmed_pairs = tuple(sorted(selected))
             self.statistics_summary = None
 
-            # Export heatmap after confirming selected transitions.
-            if self.output_folder:
-                from .comparative_transition_heatmap import (
-                    export_comparative_transition_heatmap,
-                )
-
-                heatmap_path = export_comparative_transition_heatmap(
-                    comparison=self.comparison,
-                    confirmed_pairs=self.confirmed_pairs,
-                    output_folder=self.output_folder,
-                    filename='selected_transition_heatmaps.png',
-                    group_titles=('Control', 'Treatment'),
-                    dpi=200,
-                )
-
             if self.confirmed_pairs:
                 from .comparative_transition_analysis import top_group_transitions
                 ranked = confirmed_group_top_transitions(self.comparison, self.confirmed_pairs)
@@ -2586,13 +2571,41 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
                         'group_2_top_5_transitions.csv',
                     ):
                         (Path(self.output_folder) / filename).unlink(missing_ok=True)
+            
+            if self.confirmed_pairs and self.output_folder:
+                try:
+                    heatmap_path = export_comparative_transition_heatmap(
+                        behaviors=behaviors,
+                        matrices=matrices,
+                        confirmed_pairs=self.confirmed_pairs,
+                        output_folder=self.output_folder,
+                        filename='selected_transition_heatmaps.png',
+                        dpi=200,
+                    )
+
+                    if heatmap_path is not None:
+                        self.summary.AppendText(
+                            f'\n\nComparative heatmap saved in:\n'
+                            f'{heatmap_path.resolve()}\n'
+                        )
+
+                except Exception as exc:
+                    wx.MessageBox(
+                        f'Heatmap export failed:\n{exc}',
+                        'Heatmap Export Error',
+                        wx.OK | wx.ICON_ERROR,
+                    )
+
             if self.confirmed_pairs:
                 self.selection_label.SetLabel(
                     f'Confirmed {len(self.confirmed_pairs)} transitions. '
                     'Click "Select and confirm transitions" to review or edit.'
                 )
             else:
-                self.selection_label.SetLabel('No transitions selected. Reopen the matrices to select transitions.')
+                self.selection_label.SetLabel(
+                    'No transitions selected. Reopen the selection dialog.'
+                )
+
         finally:
             dialog.Destroy()
             self.update_actions()
