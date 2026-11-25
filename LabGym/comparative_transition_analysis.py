@@ -971,6 +971,35 @@ def top_group_transitions(transition_summary, groups, top_n=5):
     return pd.concat(result, ignore_index=True) if result else pd.DataFrame(columns=columns)
 
 
+def _switching_rates_comparable(frame, fps_tolerance=0.01):
+    rate = pd.to_numeric(frame["switching_rate_per_1000_frames"], errors="coerce")
+    valid = frame.loc[np.isfinite(rate)]
+    if valid.empty or "fps" not in valid:
+        return False
+    fps = pd.to_numeric(valid["fps"], errors="coerce").to_numpy(dtype=float)
+    return bool(np.isfinite(fps).all() and (fps > 0).all() and np.ptp(fps) <= fps_tolerance)
+
+
+def build_confirmed_statistics_specs(pairs, metrics, behaviors=None):
+    """Build one test per edge, behavior, or animal-wide metric."""
+    pairs = list(dict.fromkeys(tuple(pair) for pair in pairs))
+    available = list(dict.fromkeys(b for pair in pairs for b in pair))
+    selected = available if behaviors is None else list(dict.fromkeys(behaviors))
+    if not set(selected).issubset(available):
+        raise ValueError("Behavior not represented in confirmed transitions")
+    specs = []
+    for metric in dict.fromkeys(metrics):
+        if metric == "switching_rate_per_1000_frames":
+            specs.append(dict(kind="animal", metric=metric))
+        elif metric in ("mean_bout_duration_seconds", "median_bout_duration_seconds"):
+            specs.extend(dict(kind="behavior", behavior=b, metric=metric) for b in selected)
+        elif metric in ("transition_probability", "transition_count"):
+            specs.extend(dict(kind="transition", source_behavior=a, target_behavior=b, metric=metric) for a, b in pairs)
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+    return specs
+
+
 def build_group_summaries(
     transition_df,
     behavior_df,
@@ -1087,6 +1116,13 @@ def build_group_summaries(
         raise ValueError(
             "Missing behavior rows in a group"
         )
+
+    rate = "switching_rate_per_1000_frames"
+    comparable = _switching_rates_comparable(transition_df)
+    for summary in (edge_summary, behavior_summary):
+        summary["switching_rate_comparable"] = comparable
+        if not comparable:
+            summary[f"mean_{rate}"] = np.nan
 
     # Align group summaries before calculating differences.
     left = edge_summary[
@@ -1710,6 +1746,9 @@ def _normalize_confirmed_selection(selection):
     item = dict(selection)
     kind = item.get("kind", "transition")
     metric = item.get("metric", "transition_probability" if kind == "transition" else None)
+    if metric == "switching_rate_per_1000_frames" and kind in ("transition", "behavior", "animal"):
+        return dict(kind="animal", metric=metric, source_behavior=None,
+                    target_behavior=None, behavior=None, selection_label=metric)
     if kind not in ("transition", "behavior"):
         raise ValueError("Selection kind must be 'transition' or 'behavior'")
     allowed = _TRANSITION_TEST_METRICS if kind == "transition" else _BEHAVIOR_TEST_METRICS
@@ -1779,6 +1818,12 @@ def _values_for_confirmed_selection(comparison, spec):
             frame["source_behavior"].eq(spec["source_behavior"]) &
             frame["target_behavior"].eq(spec["target_behavior"])
         ].copy()
+    elif spec["kind"] == "animal":
+        frame = comparison["per_animal_transitions"]
+        columns = _ANIMAL_IDENTITY_COLUMNS + [spec["metric"]]
+        columns += ["fps"] if "fps" in frame else []
+        columns += [c for c in ["fps_source"] if c in frame]
+        subset = frame[columns].drop_duplicates().copy()
     else:
         frame = comparison["per_animal_behaviors"]
         subset = frame.loc[frame["behavior"].eq(spec["behavior"])].copy()
@@ -1819,6 +1864,16 @@ def build_two_group_statistics(
     if len(groups) != 2 or groups[0] == groups[1]:
         raise ValueError("Exactly two distinct groups are required")
     selections = [_normalize_confirmed_selection(x) for x in confirmed_selections]
+    # Legacy callers may request the animal-wide rate on multiple edges.
+    seen_rate = False
+    unique = []
+    for spec in selections:
+        if spec["kind"] == "animal":
+            if seen_rate:
+                continue
+            seen_rate = True
+        unique.append(spec)
+    selections = unique
     labels = [x["selection_label"] for x in selections]
     if len(labels) != len(set(labels)):
         raise ValueError("Duplicate confirmed selections")
@@ -1846,8 +1901,10 @@ def build_two_group_statistics(
         if spec["metric"] == "switching_rate_per_1000_frames":
             valid_fps = subset.loc[~subset["excluded_from_test"], "fps"] if "fps" in subset else pd.Series(dtype=float)
             fps = pd.to_numeric(valid_fps, errors="coerce").to_numpy(dtype=float)
-            if len(fps) != sum(n_valid) or not np.isfinite(fps).all() or (len(fps) and np.ptp(fps) > fps_tolerance):
+            if len(fps) != sum(n_valid) or not np.isfinite(fps).all() or (fps <= 0).any() or (len(fps) and np.ptp(fps) > fps_tolerance):
                 reason = (reason + "; " if reason else "") + "incompatible_fps_for_switching_rate"
+        if "incompatible_fps_for_switching_rate" in reason:
+            warnings.append("descriptive_rates_not_comparable")
         if spec["metric"] == "transition_count":
             warnings.append("raw_counts_not_exposure_normalized")
         if sum(n_excluded):
@@ -1865,6 +1922,9 @@ def build_two_group_statistics(
                "p_raw": np.nan, "p_holm": np.nan, "significant_holm": None,
                "alpha": alpha, "test_type": "not_testable", "permutation_count": 0,
                "seed": np.nan, "warnings": "; ".join(warnings)}
+        if "incompatible_fps_for_switching_rate" in reason:
+            for key in ("mean_a", "mean_b", "mean_difference_a_minus_b", "cliffs_delta_a_vs_b"):
+                row[key] = np.nan
         if not reason:
             p, method, count, used_seed = _permutation_test(a, b, seed=int(seed))
             row.update(p_raw=p, test_type=method, permutation_count=count,

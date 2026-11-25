@@ -985,3 +985,66 @@ def test_generate_does_not_show_rankings_or_launch_statistics(monkeypatch, tmp_p
     fake.select_transitions.assert_not_called()
     fake.run_statistics.assert_not_called()
     assert build.call_args.kwargs['export_top_transitions'] is False
+
+def comparison(fps_b=30):
+    rows = []
+    for group, fps, value in [('A', 30, 1.), ('B', fps_b, 0.)]:
+        for animal in range(5):
+            for a, b in [('walk', 'rest'), ('rest', 'walk')]:
+                rows.append(dict(group=group, source_recording=group, species='mouse',
+                                 animal_id=animal, source_behavior=a, target_behavior=b,
+                                 switching_rate_per_1000_frames=value, fps=fps,
+                                 transition_probability=value))
+    t = pd.DataFrame(rows)
+    b = t.rename(columns={'source_behavior': 'behavior'}).copy()
+    b['mean_bout_duration_seconds'] = b['transition_probability']
+    b['median_bout_duration_seconds'] = b['transition_probability']
+    return dict(groups=('A', 'B'), per_animal_transitions=t, per_animal_behaviors=b)
+
+
+def test_switching_family_once():
+    specs = [dict(kind='transition', source_behavior=a, target_behavior=b,
+                  metric='switching_rate_per_1000_frames')
+             for a, b in [('walk', 'rest'), ('rest', 'walk')]]
+    result = m.build_two_group_statistics(comparison(), specs)
+    assert len(result['results']) == 1
+    assert len(result['per_animal_values']) == 10
+    assert result['results'].iloc[0].kind == 'animal'
+    assert result['results'].iloc[0].testable
+
+
+def test_incompatible_fps():
+    specs = m.build_confirmed_statistics_specs([('walk', 'rest')],
+                ['switching_rate_per_1000_frames', 'transition_probability'])
+    rows = m.build_two_group_statistics(comparison(60), specs)['results']
+    assert not rows.iloc[0].testable
+    assert 'incompatible_fps' in rows.iloc[0].non_testable_reason
+    assert rows.iloc[0][['mean_a', 'mean_b', 'mean_difference_a_minus_b', 'cliffs_delta_a_vs_b', 'p_raw', 'p_holm']].isna().all()
+    assert rows.iloc[1].testable
+
+
+def test_behavior_selection():
+    pairs = [('walk', 'rest'), ('rest', 'walk')]
+    metrics = ['mean_bout_duration_seconds', 'median_bout_duration_seconds']
+    specs = m.build_confirmed_statistics_specs(pairs, metrics)
+    assert len(specs) == 4
+    assert len(m.build_two_group_statistics(comparison(), specs)['results']) == 4
+    assert len(m.build_confirmed_statistics_specs(pairs, metrics, ['walk'])) == 2
+    with pytest.raises(ValueError):
+        m.build_confirmed_statistics_specs(pairs, metrics, ['unknown'])
+
+
+def test_direction_and_fixed_contrast(tmp_path):
+    c = comparison()
+    c.update(difference_direction='A-B', difference_direction_label='A - B',
+             signed_differences=pd.DataFrame({'source_behavior':['walk'], 'target_behavior':['rest'],
+                 'difference_transition_probability':[1.], 'difference_direction':['A - B']}),
+             difference_matrix=pd.DataFrame([[np.nan, 1.], [-1., np.nan]], index=['walk','rest'], columns=['walk','rest']))
+    flipped = m.set_difference_direction(c, 'B-A')
+    m.export_signed_differences(flipped, tmp_path)
+    pd.testing.assert_frame_equal(flipped['difference_matrix'], -c['difference_matrix'])
+    assert pd.read_csv(tmp_path/'group_signed_differences.csv').difference_direction.iloc[0] == 'B - A'
+    assert pd.read_csv(tmp_path/'signed_difference_matrix.csv').columns[0] == 'source_behavior (B - A)'
+    a = m.build_two_group_statistics(c, [('walk','rest')])['results']
+    b = m.build_two_group_statistics(flipped, [('walk','rest')])['results']
+    pd.testing.assert_frame_equal(a, b)

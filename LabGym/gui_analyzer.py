@@ -2281,11 +2281,13 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
     TRANSITION_METRICS = (
         ('Transition probability', 'transition_probability'),
         ('Transition count', 'transition_count'),
-        ('Switching rate per 1000 frames', 'switching_rate_per_1000_frames'),
     )
     BEHAVIOR_METRICS = (
         ('Mean bout duration (seconds)', 'mean_bout_duration_seconds'),
         ('Median bout duration (seconds)', 'median_bout_duration_seconds'),
+    )
+
+    ANIMAL_METRICS = (
         ('Switching rate per 1000 frames', 'switching_rate_per_1000_frames'),
     )
 
@@ -2296,6 +2298,7 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
         self.comparison = None
         self.confirmed_pairs = None
         self.statistics_summary = None
+        self.difference_direction = "A-B"
         self.display_window()
 
     def display_window(self):
@@ -2325,6 +2328,14 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
         line.Add(button, 0, wx.ALL, 8)
         line.Add(self.output_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
         layout.Add(line, 0, wx.EXPAND)
+
+        direction_row = wx.BoxSizer(wx.HORIZONTAL)
+        direction_row.Add(wx.StaticText(self, label='Difference direction:'), 0, wx.ALL, 8)
+        self.direction_choice = wx.Choice(self, choices=['Group A - Group B', 'Group B - Group A'])
+        self.direction_choice.SetSelection(0)
+        self.direction_choice.Bind(wx.EVT_CHOICE, self.change_difference_direction)
+        direction_row.Add(self.direction_choice, 0, wx.ALL, 8)
+        layout.Add(direction_row, 0, wx.EXPAND)
 
         # Comparison and transition selection are separate from statistical testing.
         comparison_actions = wx.BoxSizer(wx.HORIZONTAL)
@@ -2402,7 +2413,8 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
             comparison = build_comparative_analysis(
                 recordings, output_folder=self.output_folder,
                 group_order=('A', 'B'), behavior_order=behaviors,
-                export_top_transitions=False)
+                export_top_transitions=False,
+                difference_direction=getattr(self, "difference_direction", "A-B"))
             self.comparison = comparison
             lines = ['Comparison generated. Select and confirm transitions to view Group A and Group B Top 5 rankings.']
             lines.append(f'Comparison CSV results saved in: {self.output_folder}')
@@ -2426,7 +2438,7 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
         matrices = [
             ('Group A', comparison['probability_matrices']['A']),
             ('Group B', comparison['probability_matrices']['B']),
-            ('Difference (A - B)', comparison['difference_matrix']),
+            (f"Difference ({comparison.get('difference_direction_label', 'A - B')})", comparison['difference_matrix']),
         ]
         available = set(zip(
             comparison['signed_differences']['source_behavior'],
@@ -2610,36 +2622,84 @@ class PanelLv2_ComparativeTransitionAnalysis(wx.Panel):
             dialog.Destroy()
             self.update_actions()
 
+    def change_difference_direction(self, event):
+        from .comparative_transition_analysis import set_difference_direction, export_signed_differences
+        direction = 'A-B' if self.direction_choice.GetSelection() == 0 else 'B-A'
+        if self.comparison is None:
+            self.difference_direction = direction
+            return
+        try:
+            updated = set_difference_direction(self.comparison, direction)
+        except Exception as exc:
+            self.direction_choice.SetSelection(0 if self.difference_direction == 'A-B' else 1)
+            wx.MessageBox(str(exc), 'Error', wx.OK | wx.ICON_ERROR)
+            return
+        self.comparison = updated
+        self.difference_direction = direction
+        label = updated['difference_direction_label']
+        self.summary.AppendText(f'\nDisplay difference: {label}. Statistical contrast unchanged.\n')
+        if self.output_folder:
+            try:
+                export_signed_differences(updated, self.output_folder)
+                if self.confirmed_pairs:
+                    matrices = [(f'Group {group}', updated['probability_matrices'][group]) for group in updated['groups']]
+                    matrices.append((f'Difference ({label})', updated['difference_matrix']))
+                    path = export_comparative_transition_heatmap(
+                        behaviors=updated['behaviors'], matrices=matrices,
+                        confirmed_pairs=self.confirmed_pairs, output_folder=self.output_folder,
+                        filename='selected_transition_heatmaps.png', dpi=200)
+                    if path is not None:
+                        self.summary.AppendText(f'\nComparative heatmap saved in:\n{path.resolve()}\n')
+            except Exception as exc:
+                wx.MessageBox(f'Display updated but export failed; files may be stale:\n{exc}', 'Export Error', wx.OK | wx.ICON_ERROR)
+
     def run_statistics(self, event):
-        from .comparative_transition_analysis import build_two_group_statistics
+        from .comparative_transition_analysis import build_two_group_statistics, build_confirmed_statistics_specs
         if self.comparison is None or not self.confirmed_pairs:
             wx.MessageBox('Confirm at least one transition first.', 'Missing selection', wx.OK | wx.ICON_ERROR)
             return
-        choices = [label for label, _ in self.TRANSITION_METRICS]
+        options = self.TRANSITION_METRICS + self.BEHAVIOR_METRICS + self.ANIMAL_METRICS
         dialog = wx.MultiChoiceDialog(self, 'Choose statistics for the confirmed transitions.',
-                                      'Select Statistics', choices=choices)
+                                      'Select Statistics', choices=[label for label, _ in options])
         try:
             if dialog.ShowModal() != wx.ID_OK:
                 return
-            metrics = [self.TRANSITION_METRICS[i][1] for i in dialog.GetSelections()]
+            metrics = [options[i][1] for i in dialog.GetSelections()]
         finally:
             dialog.Destroy()
         if not metrics:
             wx.MessageBox('Select at least one statistic.', 'Missing statistics', wx.OK | wx.ICON_WARNING)
             return
-        specs = [dict(kind='transition', source_behavior=source, target_behavior=target, metric=metric)
-                 for source, target in self.confirmed_pairs for metric in metrics]
+        behaviors = None
+        if any(metric in dict(self.BEHAVIOR_METRICS).values() for metric in metrics):
+            available = list(dict.fromkeys(b for pair in self.confirmed_pairs for b in pair))
+            dialog = wx.MultiChoiceDialog(self, 'Select behaviors for bout-duration tests.',
+                                          'Select Behaviors', choices=available)
+            try:
+                dialog.SetSelections(list(range(len(available))))
+                if dialog.ShowModal() != wx.ID_OK:
+                    return
+                behaviors = [available[i] for i in dialog.GetSelections()]
+            finally:
+                dialog.Destroy()
+            if not behaviors:
+                wx.MessageBox('Select at least one behavior.', 'Missing behaviors', wx.OK | wx.ICON_WARNING)
+                return
         try:
-            result = build_two_group_statistics(
-                self.comparison, specs, output_folder=self.output_folder)
+            specs = build_confirmed_statistics_specs(self.confirmed_pairs, metrics, behaviors)
+            result = build_two_group_statistics(self.comparison, specs, output_folder=self.output_folder)
+            self.statistics_summary = result
             frame = result['results']
             testable = int(frame['testable'].sum()) if not frame.empty else 0
             self.summary.AppendText(
-                f'\nSTATISTICS\nConfirmed transitions: {len(self.confirmed_pairs)}'
+                f'\nSTATISTICS (Group A - Group B)\nConfirmed transitions: {len(self.confirmed_pairs)}'
                 f'\nSelected metrics: {", ".join(metrics)}'
                 f'\nMeasurements: {len(frame)}; testable: {testable}'
                 f'\nSaved in: {self.output_folder}\n')
-            wx.MessageBox('Statistics complete. Check the output folder for CSV results.',
-                          'Done', wx.OK | wx.ICON_INFORMATION)
+            for row in frame.loc[~frame['testable']].itertuples():
+                self.summary.AppendText(f'Not testable: {row.selection_label}: {row.non_testable_reason}\n')
+            if frame['non_testable_reason'].str.contains('incompatible_fps', na=False).any():
+                self.summary.AppendText('Switching rates are not directly comparable across incompatible frame rates.\n')
+            wx.MessageBox('Statistics complete. Check the output folder for CSV results.', 'Done', wx.OK | wx.ICON_INFORMATION)
         except Exception as exc:
             wx.MessageBox(f'Statistical analysis failed:\n{exc}', 'Error', wx.OK | wx.ICON_ERROR)
